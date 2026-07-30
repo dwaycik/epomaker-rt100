@@ -67,6 +67,23 @@ Do not "fix" these by removing the workarounds:
 - **`hidapi==0.14.0` is pinned and does not build on Python 3.13+.** Install with
   `--no-deps` plus a distro `python-hidapi` or `hidapi==0.15.0`.
 
+## Hardware behaviour established by testing
+
+Measured on a real RT100, 2026-07-30. Do not "simplify" the code that handles
+these — they are not documented anywhere upstream:
+
+- **A key-RGB write clears the screen.** The `0x18` erase-key-SRAM init report
+  takes the screen's content buffer with it. Hence `run_on_device(...,
+  restore_screen=True)` on every backlight path and the remembered `last_image`.
+- **Brightness 0–2 leaves the LEDs dark**; only 3 and 4 light the keys. The range
+  stays 0–4 because 0 is the only backlight-off setting.
+- **The daemon holds the device for every operation**, not just uploads, so
+  `DaemonGuard` wraps all of `run_on_device` rather than just the upload.
+- **GIF animation is not achievable** with any published protocol knowledge. Do
+  not add a feature that claims to animate the screen, and do not implement it by
+  uploading frames in a loop — each upload is 1002 packets and freezes the
+  keyboard. Single-frame extraction is the honest ceiling.
+
 ## Style
 
 - One file. If it must be split, split by layer (device / fitting / UI), not by

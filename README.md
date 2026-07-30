@@ -27,7 +27,24 @@ selection, daemon handling, image fitting) that the library leaves to callers.
 - File picker with a live, actual-size preview.
 - Three fitting choices — show the whole image (letterboxed), fill and crop, or
   stretch — with a configurable bar colour.
+- GIFs are accepted and sent as a **single chosen frame**, with a frame picker.
+  See [GIFs and animation](#gifs-and-animation) — the screen cannot be animated
+  from Linux.
 - Progress by packet during upload.
+- Automatically re-sends the picture after a backlight change, because writing
+  key colours clears the screen. Switchable.
+
+## Launcher entry
+
+```bash
+./install-desktop.sh          # writes ~/.local/share/applications, no root
+./install-desktop.sh --uninstall
+```
+
+Then type "Epomaker" or "RT100" into whatever already opens your launcher. This
+is a user-level XDG desktop entry, so **no keybind or compositor configuration
+is needed** — any launcher that reads the standard directories finds it (wofi,
+rofi, fuzzel, GNOME, Plasma).
 
 ## Requirements
 
@@ -123,13 +140,13 @@ unselectable, so `RT100._find_device_path` here replaces it with a direct
 resizes with no aspect handling at all, which is why the fitting happens in this
 app before the file is handed over.
 
-**The CPU/temp daemon holds the device.** An upload fails while it runs. Before
-uploading, the app checks `systemctl --user is-active` then
-`systemctl is-active` for `epomaker-controller.service`, stops it, and restarts
-it in a `finally` block — the same approach as the library repo's
-`service/epomaker-upload-image` helper. Override the unit name with
-`EPOMAKER_SERVICE_NAME`. User units are tried first because stopping those needs
-no authorisation.
+**The CPU/temp daemon holds the device.** It holds it for *any* operation, not
+just uploads, so the app stops it around every one of them: it checks
+`systemctl --user is-active` then `systemctl is-active` for
+`epomaker-controller.service`, stops it, and restarts it in a `finally` block —
+the same approach as the library repo's `service/epomaker-upload-image` helper.
+Override the unit name with `EPOMAKER_SERVICE_NAME`. User units are tried first
+because stopping those needs no authorisation.
 
 **Packet pacing.** The firmware erases SRAM on the init report and needs a pause
 before data arrives; the endpoint buffer can also overflow if reports arrive too
@@ -142,6 +159,43 @@ back-to-back timing, since that path is known to work as-is.
 SIGINT/SIGTERM handlers that call `os._exit(0)`, which fights GTK and restricts
 construction to the main thread. `RT100._setup_signal_handling` is a no-op and
 the device is closed in a `finally` block instead.
+
+## GIFs and animation
+
+**The screen cannot be animated from Linux.** The RT100 firmware supports it —
+Epomaker's own Windows/Mac software does it via Screen → Select Picture — but the
+protocol for it has not been publicly reverse-engineered:
+
+- `EpomakerController` lists "Upload GIFs" under **TODO**, and its
+  `SUPPORTED_FORMATS` excludes `.gif` entirely.
+- `tejmar/epomaker-controller` does have GIF import, but gated behind its
+  `dynatab_screen` capability — the DynaTab's 60×9 dot-matrix. The RT100 gets
+  `rt100_screen`, documented as "162×173 status-screen **image** upload".
+
+So this app accepts a `.gif`, extracts its frames, and lets you pick **one** to
+send as a still. The file never reaches the library — only the PNG rendered from
+your chosen frame does. Frame extraction uses Pillow when it is installed;
+without it, GdkPixbuf still returns the first frame, so GIFs stay usable.
+
+Uploading frames in sequence is not a workaround: each upload is 1002 packets and
+makes the keyboard unresponsive while it runs. Real animation would mean
+capturing USB traffic from the Windows software during a GIF upload and decoding
+the command it uses.
+
+## Observed hardware behaviour
+
+Measured on an RT100, 2026-07-30. Neither of these is documented upstream:
+
+- **Backlight writes clear the screen.** Setting key colours issues the `0x18`
+  "erase key SRAM" init report, and the screen's content buffer goes with it —
+  the screen blanks until something redraws it. The app therefore remembers your
+  last uploaded picture and re-sends it after any backlight change ("Keep this
+  picture after backlight changes", on by default). Turn it off if you would
+  rather backlight changes stay instant.
+- **Brightness below 3 leaves the LEDs off.** The firmware range is 0–4, but only
+  3 and 4 actually light the keys. The full range is still exposed because 0 is
+  the only way to switch the backlight off outright; the UI says as much so the
+  low steps do not look broken.
 
 ## Known unknowns
 

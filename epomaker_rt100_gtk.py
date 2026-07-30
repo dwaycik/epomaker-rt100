@@ -363,8 +363,51 @@ FIT_MODES = [
 ]
 
 
-def fit_image(path: str, mode: str, bg: Gdk.RGBA) -> GdkPixbuf.Pixbuf:
-    """Render `path` into an IMAGE_DIMENSIONS canvas.
+PICKER_PATTERNS = ("*.png", "*.jpg", "*.jpeg", "*.bmp", "*.tif", "*.tiff",
+                   "*.webp", "*.gif")
+
+
+def load_frames(path: str) -> list[GdkPixbuf.Pixbuf]:
+    """Return every frame of `path`, or a single-item list for a still.
+
+    GIFs are accepted here even though the library's SUPPORTED_FORMATS excludes
+    them, because a GIF frame is a perfectly good still once extracted -- the
+    file never reaches the library, only the PNG rendered from the chosen frame.
+    This does NOT make the screen animate: no public implementation of the
+    RT100's animation protocol exists, and uploading frames in sequence is not a
+    substitute (each upload is 1002 packets and freezes the keyboard).
+
+    Pillow gives exact frame access and is used when present. It is not a hard
+    requirement -- without it, GdkPixbuf still yields the representative first
+    frame, so a GIF remains usable.
+    """
+    try:
+        from PIL import Image
+    except ImportError:
+        return [GdkPixbuf.Pixbuf.new_from_file(path)]
+
+    try:
+        with Image.open(path) as image:
+            count = getattr(image, "n_frames", 1)
+            if count <= 1:
+                return [GdkPixbuf.Pixbuf.new_from_file(path)]
+            frames = []
+            for number in range(min(count, 512)):
+                image.seek(number)
+                rgb = image.convert("RGB")
+                data = GLib.Bytes.new(rgb.tobytes())
+                frames.append(GdkPixbuf.Pixbuf.new_from_bytes(
+                    data, GdkPixbuf.Colorspace.RGB, False, 8,
+                    rgb.width, rgb.height, rgb.width * 3,
+                ))
+            return frames
+    except Exception:
+        # A frame walk that fails should not make the file unusable.
+        return [GdkPixbuf.Pixbuf.new_from_file(path)]
+
+
+def fit_pixbuf(source: GdkPixbuf.Pixbuf, mode: str, bg: Gdk.RGBA) -> GdkPixbuf.Pixbuf:
+    """Render `source` into an IMAGE_DIMENSIONS canvas.
 
     IMAGE_DIMENSIONS comes straight from the library
     (commands/data/constants.py) and is a cv2.resize dsize, so it reads
@@ -372,7 +415,6 @@ def fit_image(path: str, mode: str, bg: Gdk.RGBA) -> GdkPixbuf.Pixbuf:
     aspect handling, which is why the fitting happens here instead.
     """
     width, height = IMAGE_DIMENSIONS
-    source = GdkPixbuf.Pixbuf.new_from_file(path)
     if source.get_has_alpha():
         flat = GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB, False, 8,
                                     source.get_width(), source.get_height())
@@ -504,6 +546,9 @@ class Window(Adw.ApplicationWindow):
         self.busy = False
         self.keyboard_keys = None
         self.image_path: str | None = None
+        self.frames: list[GdkPixbuf.Pixbuf] = []
+        self.frame_index = 0
+        self._last_sent: GdkPixbuf.Pixbuf | None = None
         self.fit_mode = self.settings.get("fit_mode", "letterbox")
 
         self.keycap_css = Gtk.CssProvider()
@@ -622,6 +667,14 @@ class Window(Adw.ApplicationWindow):
             Profile.Brightness.MIN.value, Profile.Brightness.MAX.value, 1
         )
         self.bright_row.set_title("Brightness")
+        # Measured on an RT100, 2026-07-30: anything below 3 leaves the LEDs
+        # dark. The firmware range is 0-4 and the full range is kept, because 0
+        # is the only way to switch the backlight off outright -- but the low
+        # steps are not a gradient, so say so rather than let them look broken.
+        self.bright_row.set_subtitle(
+            "Only 3 and 4 actually light the keys — 0, 1 and 2 leave them off "
+            "(use 0 to turn the backlight off)"
+        )
         self.bright_row.set_value(Profile.Brightness.DEFAULT.value)
         group.add(self.bright_row)
 
@@ -750,6 +803,18 @@ class Window(Adw.ApplicationWindow):
         self.file_row.add_suffix(browse)
         group.add(self.file_row)
 
+        # GIFs are accepted, but as a single frame. The screen cannot be made to
+        # animate: no public implementation of the RT100's animation protocol
+        # exists. Epomaker's own Windows/Mac software is the only thing that does
+        # it. Sending frames in sequence is not a workaround -- each upload is
+        # 1002 packets and freezes the keyboard while it runs.
+        self.frame_row = Adw.SpinRow.new_with_range(1, 1, 1)
+        self.frame_row.set_title("Frame")
+        self.frame_row.set_subtitle("Animated files are sent as one still frame")
+        self.frame_row.set_visible(False)
+        self.frame_row.connect("notify::value", self.on_frame_changed)
+        group.add(self.frame_row)
+
         self.fit_row = Adw.ComboRow(
             title="Fitting",
             model=Gtk.StringList.new([label for _, label, _ in FIT_MODES]),
@@ -768,6 +833,18 @@ class Window(Adw.ApplicationWindow):
         self.bar_colour.connect("notify::rgba", lambda *_: self.update_preview())
         row.add_suffix(self.bar_colour)
         group.add(row)
+
+        self.restore_row = Adw.SwitchRow(
+            title="Keep this picture after backlight changes",
+            subtitle=(
+                "Writing key colours clears the screen on this hardware, so the "
+                "picture is sent again automatically. Adds a few seconds to each "
+                "backlight change."
+            ),
+            active=bool(self.settings.get("restore_screen", True)),
+        )
+        self.restore_row.connect("notify::active", lambda *_: self.persist())
+        group.add(self.restore_row)
         page.add(group)
 
         group = Adw.PreferencesGroup(title="Preview", description="Actual size.")
@@ -987,17 +1064,35 @@ class Window(Adw.ApplicationWindow):
         self.refresh_device()
 
     def persist(self) -> None:
-        save_settings({
+        # Merge rather than replace, so last_image survives unrelated saves.
+        self.settings.update({
             "interface": self.interface,
             "backslash_index_name": self.backslash_index_name,
             "key_colours": self.key_colours,
             "fit_mode": self.fit_mode,
+            "restore_screen": (
+                self.restore_row.get_active() if hasattr(self, "restore_row") else True
+            ),
         })
+        save_settings(self.settings)
 
     # ------------------------------------------------------------ operations --
 
-    def run_on_device(self, label: str, work: Callable[[RT100], str]) -> None:
-        """Open the device on a worker thread, run `work`, always close it."""
+    def run_on_device(
+        self, label: str, work: Callable[[RT100], str], restore_screen: bool = False
+    ) -> None:
+        """Open the device on a worker thread, run `work`, always close it.
+
+        The CPU/temp daemon holds the device for *any* operation, not only
+        uploads, so it is stopped around the whole thing and restarted in a
+        finally block -- the same shape as the library repo's
+        service/epomaker-upload-image helper.
+
+        With restore_screen, the last uploaded picture is re-sent afterwards.
+        Writing key colours issues the 0x18 "erase key SRAM" report, which on
+        this hardware also clears the screen's content buffer, so a backlight
+        change blanks the screen until something redraws it.
+        """
         if IMPORT_ERROR or not getattr(self, "device_ready", False):
             self.toast("Keyboard is not available.")
             return
@@ -1006,14 +1101,26 @@ class Window(Adw.ApplicationWindow):
             return
         self.busy = True
 
+        # Snapshot anything widget-derived here, on the main thread.
+        payload = self._screen_payload() if restore_screen else None
+
         def thread_body() -> None:
             device: RT100 | None = None
+            guard = DaemonGuard()
+            notes: list[str] = []
             try:
+                stopped = guard.stop()
+                if stopped:
+                    notes.append(stopped)
                 config = load_main_config()
                 device = RT100(config, interface=self.interface)
                 device.open_device()
                 message = work(device)
-                GLib.idle_add(self._finish, message, None)
+                if payload is not None:
+                    GLib.idle_add(self._begin_restore)
+                    self._upload_pixbuf(device, payload)
+                    message += " Screen picture restored."
+                GLib.idle_add(self._finish, " ".join([message, *notes]), None)
             except DeviceMissing as exc:
                 GLib.idle_add(self._finish, None, str(exc))
             except DevicePermission as exc:
@@ -1035,8 +1142,57 @@ class Window(Adw.ApplicationWindow):
                         device.close_device()
                     except Exception:
                         pass
+                try:
+                    guard.restart()
+                except Exception:
+                    pass
 
         threading.Thread(target=thread_body, daemon=True, name="rt100-io").start()
+
+    def _screen_payload(self) -> GdkPixbuf.Pixbuf | None:
+        """The picture to put back on the screen, or None if there isn't one."""
+        if not getattr(self, "restore_row", None) or not self.restore_row.get_active():
+            return None
+        if getattr(self, "_last_sent", None) is not None:
+            return self._last_sent
+        # Nothing sent this run -- rebuild from what was remembered last time.
+        remembered = self.settings.get("last_image")
+        if not remembered:
+            return None
+        try:
+            frames = load_frames(remembered["path"])
+            index = min(remembered.get("frame", 0), len(frames) - 1)
+            bg = _rgba(remembered.get("bar", "#000000"))
+            return fit_pixbuf(frames[index], remembered.get("fit", "letterbox"), bg)
+        except Exception:
+            return None
+
+    def _upload_pixbuf(
+        self, dev: RT100, pixbuf: GdkPixbuf.Pixbuf, report: bool = False
+    ) -> None:
+        """Encode and send one already-fitted pixbuf. Runs on the worker thread."""
+        handle, temp = tempfile.mkstemp(prefix="rt100-", suffix=".png")
+        os.close(handle)
+        try:
+            pixbuf.savev(temp, "png", [], [])
+            command = EpomakerImageCommand.EpomakerImageCommand()
+            command.encode_image(temp)
+            progress = None
+            if report:
+                def progress(done: int, total: int) -> None:
+                    GLib.idle_add(self._set_progress, done, total)
+            dev.send_paced(command, ERASE_DELAY_S, IMAGE_PACKET_DELAY_S, progress)
+        finally:
+            try:
+                os.unlink(temp)
+            except OSError:
+                pass
+
+    def _begin_restore(self) -> bool:
+        self.upload_progress.set_visible(True)
+        self.upload_progress.set_fraction(0.0)
+        self.upload_progress.set_text("Restoring the screen picture…")
+        return False
 
     def _finish(self, message: str | None, error: str | None) -> bool:
         self.busy = False
@@ -1054,7 +1210,7 @@ class Window(Adw.ApplicationWindow):
             dev.set_rgb_all_keys(r, g, b)
             return f"All keys set to rgb({r}, {g}, {b})."
 
-        self.run_on_device("Solid colour", work)
+        self.run_on_device("Solid colour", work, restore_screen=True)
 
     def on_apply_mode(self, *_args) -> None:
         mode = self.modes[self.mode_row.get_selected()]
@@ -1094,7 +1250,7 @@ class Window(Adw.ApplicationWindow):
             dev.send_paced(command, ERASE_DELAY_S, KEY_PACKET_DELAY_S)
             return f"Sent {len(index_to_colour)} coloured keys."
 
-        self.run_on_device("Per-key colours", work)
+        self.run_on_device("Per-key colours", work, restore_screen=True)
 
     # ---------------------------------------------------------------- screen --
 
@@ -1102,8 +1258,8 @@ class Window(Adw.ApplicationWindow):
         dialog = Gtk.FileDialog(title="Choose an image")
         filters = Gio.ListStore.new(Gtk.FileFilter)
         image_filter = Gtk.FileFilter()
-        image_filter.set_name("Images the keyboard accepts")
-        for pattern in ("*.png", "*.jpg", "*.jpeg", "*.bmp", "*.tif", "*.tiff", "*.webp"):
+        image_filter.set_name("Images and GIFs (GIFs send one frame)")
+        for pattern in PICKER_PATTERNS:
             image_filter.add_pattern(pattern)
         filters.append(image_filter)
         dialog.set_filters(filters)
@@ -1117,9 +1273,29 @@ class Window(Adw.ApplicationWindow):
         if gfile is None:
             return
         self.image_path = gfile.get_path()
-        self.file_row.set_subtitle(self.image_path or "")
+        try:
+            self.frames = load_frames(self.image_path)
+        except Exception as exc:
+            self.show_error(f"Could not read that image.\n\n{type(exc).__name__}: {exc}")
+            return
+
+        count = len(self.frames)
+        self.frame_index = 0
+        self.frame_row.set_visible(count > 1)
+        if count > 1:
+            self.frame_row.set_range(1, count)
+            self.frame_row.set_value(1)
+            self.frame_row.set_subtitle(
+                f"{count} frames — the screen shows one still, not the animation"
+            )
+        name = Path(self.image_path).name
+        self.file_row.set_subtitle(f"{name} ({count} frames)" if count > 1 else name)
         self.update_preview()
         self.upload_button.set_sensitive(getattr(self, "device_ready", False))
+
+    def on_frame_changed(self, row: Adw.SpinRow, *_args) -> None:
+        self.frame_index = max(0, int(row.get_value()) - 1)
+        self.update_preview()
 
     def on_fit_changed(self, row: Adw.ComboRow, *_args) -> None:
         self.fit_mode = FIT_MODES[row.get_selected()][0]
@@ -1128,12 +1304,15 @@ class Window(Adw.ApplicationWindow):
         self.update_preview()
 
     def update_preview(self) -> None:
-        if not self.image_path:
+        if not self.image_path or not getattr(self, "frames", None):
             return
+        index = min(self.frame_index, len(self.frames) - 1)
         try:
-            pixbuf = fit_image(self.image_path, self.fit_mode, self.bar_colour.get_rgba())
+            pixbuf = fit_pixbuf(
+                self.frames[index], self.fit_mode, self.bar_colour.get_rgba()
+            )
         except Exception as exc:
-            self.show_error(f"Could not read that image.\n\n{type(exc).__name__}: {exc}")
+            self.show_error(f"Could not render that image.\n\n{type(exc).__name__}: {exc}")
             return
         self.preview.set_pixbuf(pixbuf)
         self._fitted = pixbuf
@@ -1147,35 +1326,23 @@ class Window(Adw.ApplicationWindow):
         self.upload_progress.set_text("Preparing…")
 
         def work(dev: RT100) -> str:
-            notes: list[str] = []
-            guard = DaemonGuard()
-            stopped = guard.stop()
-            if stopped:
-                notes.append(stopped)
-            try:
-                handle, temp = tempfile.mkstemp(prefix="rt100-", suffix=".png")
-                os.close(handle)
-                try:
-                    pixbuf.savev(temp, "png", [], [])
-                    command = EpomakerImageCommand.EpomakerImageCommand()
-                    command.encode_image(temp)
-
-                    def progress(done: int, total: int) -> None:
-                        GLib.idle_add(self._set_progress, done, total)
-
-                    dev.send_paced(command, ERASE_DELAY_S, IMAGE_PACKET_DELAY_S, progress)
-                finally:
-                    try:
-                        os.unlink(temp)
-                    except OSError:
-                        pass
-            finally:
-                restarted = guard.restart()
-                if restarted:
-                    notes.append(restarted)
-            return " ".join(["Image uploaded.", *notes])
+            self._upload_pixbuf(dev, pixbuf, report=True)
+            # Remember it so a later backlight change can put it back.
+            self._last_sent = pixbuf
+            GLib.idle_add(self._remember_image)
+            return "Image uploaded."
 
         self.run_on_device("Image upload", work)
+
+    def _remember_image(self) -> bool:
+        self.settings["last_image"] = {
+            "path": self.image_path,
+            "fit": self.fit_mode,
+            "frame": self.frame_index,
+            "bar": _hex(self.bar_colour.get_rgba()),
+        }
+        self.persist()
+        return False
 
     def _set_progress(self, done: int, total: int) -> bool:
         self.upload_progress.set_fraction(done / total)
