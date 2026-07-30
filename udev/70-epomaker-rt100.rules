@@ -1,0 +1,27 @@
+# Epomaker RT100 (ROYUAN, vendor 3151) — USB-wired HID control.
+#
+# Why this exists:
+#   EpomakerController does `import hid`, which in the cython-hidapi build is
+#   the *libusb* backend (see cython-hidapi/setup.py: libusb is the Linux
+#   default). That backend talks to /dev/bus/usb/BBB/DDD, which is root-only
+#   by default. The ACLs systemd-logind already puts on /dev/hidraw* do NOT
+#   help, because the libusb backend never opens those nodes.
+#
+# Why the filename starts with 70 and not 99:
+#   /usr/lib/udev/rules.d/73-seat-late.rules is what turns TAG=="uaccess" into
+#   an actual ACL. A rule file sorting *after* 73 sets the tag too late and is
+#   silently ignored. 70- sorts before it.
+#
+# Why TAG+="uaccess" and not MODE="0666" GROUP="plugdev":
+#   uaccess grants only the user logged in at the active seat, which is the
+#   Arch/systemd-standard mechanism (and the one already governing the
+#   /dev/hidraw* nodes on this board). MODE="0666" would make the keyboard
+#   world-writable, and "plugdev" does not exist as a group on Arch.
+#
+# Install:
+#   sudo install -m644 udev/70-epomaker-rt100.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+#   then unplug and replug the keyboard.
+
+SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="3151", ATTR{idProduct}=="4010", TAG+="uaccess"
+SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="3151", ATTR{idProduct}=="4015", TAG+="uaccess"

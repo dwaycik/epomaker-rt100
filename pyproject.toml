@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "epomaker-rt100-gtk"
+version = "0.1.0"
+description = "GTK4/libadwaita control panel for the Epomaker RT100 keyboard"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+keywords = ["epomaker", "rt100", "keyboard", "rgb", "gtk4", "libadwaita"]
+classifiers = [
+    "Environment :: X11 Applications :: GTK",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+]
+
+# PyGObject is deliberately NOT listed. Building it from PyPI needs the full
+# GTK/GObject toolchain, and every target distro ships a working binding
+# already. Install python-gobject / python3-gi from your package manager and
+# create the venv with --system-site-packages. See README.md.
+#
+# EpomakerController pins hidapi==0.14.0, which does not build on Python 3.13+,
+# so it is installed with --no-deps in the documented setup rather than being
+# depended on here.
+dependencies = []
+
+[project.optional-dependencies]
+# What `pip install --no-deps EpomakerController` leaves you to provide.
+library = [
+    "EpomakerController>=0.0.8",
+    "appdirs",
+    "click",
+    "gpustat",
+    "numpy",
+    "opencv-python-headless",
+    "psutil",
+    "python-dateutil",
+    "hidapi>=0.15.0",
+]
+
+[project.scripts]
+epomaker-rt100-gtk = "epomaker_rt100_gtk:main"
+
+[tool.setuptools]
+py-modules = ["epomaker_rt100_gtk"]
