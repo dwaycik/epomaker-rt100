@@ -128,6 +128,87 @@ def _stub_gpustat() -> None:
 
 _stub_gpustat()
 
+
+def _stub_cv2() -> None:
+    """Satisfy the library's cv2 import with Pillow and numpy.
+
+    The library uses OpenCV for exactly five calls -- imread, resize, flip,
+    rotate and cvtColor -- to turn an image into the RGB565 buffer the firmware
+    wants. On Arch, python-opencv pulls in VTK, OpenMPI, hdf5 and qt6-base:
+    around 436 MiB of scientific computing stack to rotate a 162x173 bitmap.
+
+    Pillow and numpy are already required here, and cover all five exactly.
+    flip and rotate are pure numpy, so they are bit-exact. resize is only ever
+    called with the size the image already has -- both front ends fit images
+    before handing them over -- so it short-circuits and never interpolates.
+
+    Installed only when the real cv2 is genuinely missing, so anyone who has
+    OpenCV keeps using it.
+    """
+    if "cv2" in sys.modules:
+        return
+    try:
+        import cv2  # noqa: F401
+        return
+    except ImportError:
+        pass
+
+    import types
+
+    import numpy as _np
+    from PIL import Image as _Image
+
+    module = types.ModuleType("cv2")
+    module.ROTATE_90_CLOCKWISE = 0
+    module.ROTATE_180 = 1
+    module.ROTATE_90_COUNTERCLOCKWISE = 2
+    module.COLOR_BGR2RGB = 4
+    module.COLOR_RGB2BGR = 4  # the same channel reversal in either direction
+    module.INTER_LINEAR = 1
+
+    def imread(path, flags=None):
+        """Return an HxWx3 uint8 array in BGR order, as OpenCV does."""
+        with _Image.open(path) as handle:
+            rgb = _np.asarray(handle.convert("RGB"), dtype=_np.uint8)
+        return rgb[:, :, ::-1].copy()
+
+    def resize(image, dsize, interpolation=None):
+        width, height = dsize
+        if image.shape[1] == width and image.shape[0] == height:
+            return image  # already correct: avoid a needless resample
+        mode = "RGB" if image.ndim == 3 else "L"
+        pil = _Image.fromarray(image if image.ndim == 2 else image[:, :, ::-1], mode)
+        out = _np.asarray(pil.resize((width, height), _Image.BILINEAR), dtype=_np.uint8)
+        return out if image.ndim == 2 else out[:, :, ::-1].copy()
+
+    def flip(image, flip_code):
+        if flip_code == 0:
+            return _np.flipud(image).copy()
+        if flip_code > 0:
+            return _np.fliplr(image).copy()
+        return _np.flipud(_np.fliplr(image)).copy()
+
+    def rotate(image, rotate_code):
+        # np.rot90 turns anti-clockwise, so clockwise is k=-1.
+        if rotate_code == module.ROTATE_90_CLOCKWISE:
+            return _np.rot90(image, k=-1).copy()
+        if rotate_code == module.ROTATE_180:
+            return _np.rot90(image, k=2).copy()
+        return _np.rot90(image, k=1).copy()
+
+    def cvtColor(image, code):
+        return image[:, :, ::-1].copy()
+
+    module.imread = imread
+    module.resize = resize
+    module.flip = flip
+    module.rotate = rotate
+    module.cvtColor = cvtColor
+    sys.modules["cv2"] = module
+
+
+_stub_cv2()
+
 IMPORT_ERROR: str | None = None
 try:
     import hid  # from the `hidapi` package, a dependency of the library
