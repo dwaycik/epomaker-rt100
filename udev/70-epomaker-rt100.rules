@@ -23,5 +23,10 @@
 #   sudo udevadm control --reload-rules && sudo udevadm trigger
 #   then unplug and replug the keyboard.
 
+# Wired
 SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="3151", ATTR{idProduct}=="4010", TAG+="uaccess"
 SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="3151", ATTR{idProduct}=="4015", TAG+="uaccess"
+# 2.4 GHz dongle. 0.0.9 added a wireless path (USE_WIRELESS, send_wireless_init),
+# so the dongle needs the same access as the cable to be testable at all.
+SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="3151", ATTR{idProduct}=="4011", TAG+="uaccess"
+SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="3151", ATTR{idProduct}=="4016", TAG+="uaccess"
