@@ -1,4 +1,4 @@
-# epomaker-rt100-gtk
+# epomaker-rt100
 
 Linux desktop control for the **Epomaker RT100** — the little screen first:
 still images, animated GIFs, and a live clock / CPU / temperature readout.
@@ -108,7 +108,7 @@ to take git over PyPI.
 ```bash
 sudo pacman -S --needed python-gobject gtk4 libadwaita python-pillow
 
-git clone https://github.com/dwaycik/epomaker-rt100-gtk
+git clone https://github.com/dwaycik/epomaker-rt100
 cd epomaker-rt100-gtk
 python -m venv --system-site-packages .venv
 .venv/bin/pip install 'hidapi>=0.15.0' appdirs click gpustat 'numpy<2.0' \
