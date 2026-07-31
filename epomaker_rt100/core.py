@@ -89,6 +89,45 @@ def _stabilise_library_paths() -> Path:
 
 RUNTIME_DIR = _stabilise_library_paths()
 
+
+def _stub_gpustat() -> None:
+    """Satisfy the library's unconditional gpustat import without the package.
+
+    ``epomakercontroller/utils/sensors.py`` does a bare ``import gpustat`` and
+    ``from pynvml import NVMLError`` at module scope, so the whole library fails
+    to import when they are absent -- even though they are used only to read GPU
+    temperatures, which this app never asks for and which a machine with no
+    NVIDIA GPU cannot provide anyway.
+
+    Depending on them for real means pulling python-gpustat from the AUR. This
+    registers minimal stand-ins instead, but only when the real modules are
+    genuinely missing, so anyone who has them keeps full behaviour.
+    """
+    import types
+
+    if "gpustat" not in sys.modules:
+        try:
+            import gpustat  # noqa: F401
+        except ImportError:
+            module = types.ModuleType("gpustat")
+
+            def new_query():  # pragma: no cover - only reached without a GPU
+                raise RuntimeError("gpustat is not installed")
+
+            module.new_query = new_query
+            sys.modules["gpustat"] = module
+
+    if "pynvml" not in sys.modules:
+        try:
+            import pynvml  # noqa: F401
+        except ImportError:
+            module = types.ModuleType("pynvml")
+            module.NVMLError = type("NVMLError", (Exception,), {})
+            sys.modules["pynvml"] = module
+
+
+_stub_gpustat()
+
 IMPORT_ERROR: str | None = None
 try:
     import hid  # from the `hidapi` package, a dependency of the library
