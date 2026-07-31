@@ -34,7 +34,7 @@ gi.require_version("Adw", "1")
 gi.require_version("GdkPixbuf", "2.0")
 from gi.repository import Adw, Gdk, GdkPixbuf, Gio, GLib, Gtk  # noqa: E402
 
-APP_ID = "io.github.dano.EpomakerRT100"
+APP_ID = "io.github.dwaycik.EpomakerRT100"
 
 # EPOMAKER_RT100_CONFIG_DIR redirects the settings file. Its reason for existing
 # is test isolation: without it, running the validation harness scribbles over

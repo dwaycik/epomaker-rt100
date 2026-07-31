@@ -9,5 +9,5 @@ Terminal=false
 Categories=Settings;HardwareSettings;
 Keywords=keyboard;rgb;backlight;led;epomaker;rt100;screen;
 StartupNotify=true
-StartupWMClass=io.github.dano.EpomakerRT100
+StartupWMClass=io.github.dwaycik.EpomakerRT100
 SingleMainWindow=true
