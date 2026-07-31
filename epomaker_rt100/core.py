@@ -138,8 +138,10 @@ except Exception as exc:  # pragma: no cover - environment problem, not logic
 #        collection and a mouse collection. Holding it drops the keyboard from
 #        six input nodes to one, killing the volume knob and media keys until
 #        the handle closes. Measured on hardware 2026-07-31.
-#   2 -- no input collections at all, and it accepts every command this app
-#        sends: lighting, profiles, screen images, clock, CPU and temperature.
+#   2 -- no input collections at all. Lighting, profiles, screen images, clock,
+#        CPU and temperature have all been confirmed to actually take effect on
+#        it -- not merely to return without error, which a silently-ignored
+#        command also does.
 #
 # OpenRGB reaches the same conclusion independently — its Epomaker detector
 # registers this VID/PID on interface 2.
@@ -157,6 +159,15 @@ WIRELESS_PRODUCT_IDS = (0x4011, 0x4016)
 ERASE_DELAY_S = 0.25
 KEY_PACKET_DELAY_S = 0.010
 IMAGE_PACKET_DELAY_S = 0.0
+
+# Gap between consecutive screen-field writes in the daemon.
+#
+# Sending CPU and temperature back-to-back and then waiting once is NOT
+# equivalent to spacing each: the firmware drops the second value. Upstream's
+# own start_daemon wraps every send in TimeHelper(min_duration=1.6); collapsing
+# that into a single wait per cycle left the readout frozen at whatever it
+# happened to show first, while every send still reported success.
+DAEMON_SEND_SPACING = 1.6
 
 UDEV_FIX = """A permission error came back from the keyboard.
 
@@ -809,6 +820,14 @@ def run_daemon(sensor: str | None, interface: int = DEFAULT_INTERFACE) -> int:
     signal_module.signal(signal_module.SIGTERM, handle_stop)
     signal_module.signal(signal_module.SIGINT, handle_stop)
 
+    def _wait(seconds: float) -> bool:
+        """Sleep in slices so SIGTERM is still acted on promptly."""
+        for _ in range(int(seconds * 10)):
+            if stopping:
+                return True
+            time.sleep(0.1)
+        return stopping
+
     device: RT100 | None = None
     try:
         device = RT100(load_main_config(), interface=interface)
@@ -821,19 +840,17 @@ def run_daemon(sensor: str | None, interface: int = DEFAULT_INTERFACE) -> int:
         while not stopping:
             try:
                 device.send_cpu(cpu_percent())
-                if stopping:
+                if _wait(DAEMON_SEND_SPACING):
                     break
                 if sensor:
                     temperature = read_sensor(sensor)
                     if temperature is not None:
                         device.send_temperature(int(temperature))
+                    if _wait(DAEMON_SEND_SPACING):
+                        break
             except Exception as exc:
                 print(f"Update failed: {exc}", file=sys.stderr, flush=True)
                 return 1
-            for _ in range(16):  # ~1.6s, responsive to SIGTERM
-                if stopping:
-                    break
-                time.sleep(0.1)
     except DevicePermission as exc:
         print(f"{UDEV_FIX}\n\n({exc})", file=sys.stderr)
         return 1

@@ -42,7 +42,7 @@ sensor="${1:-coretemp-0}"
 mkdir -p "$unit_dir"
 # The executable path is emitted in double quotes: systemd splits ExecStart on
 # whitespace, so an unquoted path containing spaces fails with 203/EXEC.
-sed -e "s|@PYTHON@|\"$python_bin\"|" -e "s|@SCRIPT@|\"$script\"|" \
+sed -e "s|@PYTHON@ @SCRIPT@|\"$here/.venv/bin/epomaker-rt100-daemon\"|" \
     -e "s|@SENSOR@|$sensor|" \
   "$here/systemd/$unit_name.in" > "$unit"
 chmod 644 "$unit"
