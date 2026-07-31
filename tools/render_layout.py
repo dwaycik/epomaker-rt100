@@ -48,7 +48,7 @@ for name, (x, y, w, h) in app.ANSI_LAYOUT.items():
 
     lookup = app.BACKSLASH_CANDIDATES[0] if name == "BACKSLASH" else name
     key = by_name.get(lookup)
-    ambiguous = name == "BACKSLASH"
+    ambiguous = False  # index 75 confirmed on hardware 2026-07-31
 
     rounded(px, py, pw, ph)
     if ambiguous:
@@ -65,6 +65,10 @@ for name, (x, y, w, h) in app.ANSI_LAYOUT.items():
         label = (key.display_str if key else name).strip() or name
     if name == "SPACE":
         label = "Space"
+    if name == "BACKSLASH":
+        # The cap is what is printed on the keyboard, not the display_str of the
+        # ISO key sharing its LED index (75, which the ISO map calls "#").
+        label = "\\"
 
     cr.select_font_face("Noto Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_NORMAL)
     size = 13 if len(label) <= 5 else 10
@@ -74,7 +78,7 @@ for name, (x, y, w, h) in app.ANSI_LAYOUT.items():
     cr.move_to(px + (pw - ext.width) / 2 - ext.x_bearing, py + ph / 2 + 1)
     cr.show_text(label)
 
-    idx = "?" if ambiguous else (str(key.value) if key else "-")
+    idx = str(key.value) if key else "-"
     cr.set_font_size(8.5)
     cr.set_source_rgb(0.54, 0.53, 0.65)
     ext = cr.text_extents(idx)

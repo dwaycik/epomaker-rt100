@@ -261,13 +261,12 @@ Measured on an RT100, 2026-07-30. Neither of these is documented upstream:
 Two mappings are genuinely not recorded in the library, which ships a **UK ISO**
 layout only. They are not guessed here:
 
-- **The backslash key.** On UK ISO, index 10 (`BACKSLASH`) is the key between
-  Left Shift and Z, and index 75 (`HASH`) is the key left of Enter. A US ANSI
-  board has neither switch — its backslash sits at the end of the QWERTY row.
-  Which LED index the firmware gives it is unknown, so the app has a **"Test
-  next candidate"** button that lights one candidate at a time (10, 75, 80).
-  Keep whichever matches your key; the choice is saved. It is drawn highlighted
-  with a `?` until you confirm it.
+- **The backslash key — resolved.** On a US ANSI board it is **LED index 75**,
+  which the library's UK ISO keymap calls `HASH`. Confirmed on hardware
+  2026-07-31 and now the default. The library records only the ISO map, where
+  index 10 is the key between Left Shift and Z and index 75 is the key left of
+  Enter; ANSI has neither switch, and index 75 is the matrix position they
+  share. The **"Test next candidate"** button remains for other boards.
 - **Which Ctrl is which.** The library's ISO layout lists `RIGHT_CTRL` at the
   far left of the bottom row and `LEFT_CTRL` at the right. That looks like an
   upstream mix-up, but it is the only record, and LED indices are not geometric

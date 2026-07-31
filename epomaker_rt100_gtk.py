@@ -250,13 +250,18 @@ LABEL_OVERRIDES = {
     "NUMPAD_ENTER": "Enter", "ENTER": "Enter",
 }
 
-# The one genuinely unknown mapping. On a UK ISO board the library's index 10
-# ("BACKSLASH") is the key between Left Shift and Z, and index 75 ("HASH") is
-# the key left of Enter. A US ANSI board has neither of those switches -- its
-# backslash sits at the end of the QWERTY row. Which LED index the firmware
-# assigns to it is NOT recorded anywhere in the library source, so it is not
-# guessed here: the UI offers a one-click test of each candidate.
-BACKSLASH_CANDIDATES = ["BACKSLASH", "HASH", "ENTER"]
+# Confirmed on hardware 2026-07-31: the US ANSI backslash is LED index 75,
+# which the library's UK ISO keymap names "HASH".
+#
+# That is not recorded anywhere in the library, which ships an ISO map only. On
+# ISO, index 10 ("BACKSLASH") is the key between Left Shift and Z and index 75
+# is the key left of Enter; an ANSI board has neither switch, and puts backslash
+# at the end of the QWERTY row. Index 75 turns out to be the matrix position
+# those two share.
+#
+# The candidate list stays so the same test works on another board -- the first
+# entry is the default, and the UI lights each in turn.
+BACKSLASH_CANDIDATES = ["HASH", "ENTER", "BACKSLASH"]
 
 # Pacing. The upstream library sends packets back-to-back. The RT100 firmware
 # erases SRAM on the init report and needs a pause before data arrives, and the
@@ -844,7 +849,9 @@ class Window(Adw.ApplicationWindow):
 
         self.settings = load_settings()
         self.interface = int(self.settings.get("interface", 1))
-        self.backslash_index_name = self.settings.get("backslash_index_name", "BACKSLASH")
+        self.backslash_index_name = self.settings.get(
+            "backslash_index_name", BACKSLASH_CANDIDATES[0]
+        )
         self.key_colours: dict[str, str] = dict(self.settings.get("key_colours", {}))
         self.picked: set[str] = set()
         self.busy = False
@@ -1086,8 +1093,8 @@ class Window(Adw.ApplicationWindow):
         self.backslash_row = Adw.ActionRow(
             title="Backslash key position",
             subtitle=(
-                "Not recorded in the library, which only ships a UK ISO map. Light each "
-                "candidate and keep whichever matches your backslash key."
+                "Confirmed as LED index 75 on a US ANSI board. If yours differs, "
+                "light each candidate and keep the one that matches."
             ),
         )
         test = Gtk.Button(label="Test next candidate", valign=Gtk.Align.CENTER)
