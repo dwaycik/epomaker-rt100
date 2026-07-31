@@ -52,6 +52,7 @@ all = ["epomaker-rt100[tui]"]
 [project.scripts]
 epomaker-rt100 = "epomaker_rt100.tui:main"
 epomaker-rt100-gtk = "epomaker_rt100_gtk:main"
+epomaker-rt100-daemon = "epomaker_rt100.daemon:main"
 
 [tool.setuptools]
 packages = ["epomaker_rt100"]
