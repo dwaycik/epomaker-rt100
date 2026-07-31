@@ -108,7 +108,8 @@ to take git over PyPI.
 ```bash
 sudo pacman -S --needed python-gobject gtk4 libadwaita python-pillow
 
-git clone <this repo> epomaker-rt100-gtk && cd epomaker-rt100-gtk
+git clone https://github.com/dwaycik/epomaker-rt100-gtk
+cd epomaker-rt100-gtk
 python -m venv --system-site-packages .venv
 .venv/bin/pip install 'hidapi>=0.15.0' appdirs click gpustat 'numpy<2.0' \
     opencv-python-headless psutil python-dateutil pillow
