@@ -49,6 +49,23 @@ SETTINGS_PATH = (
 # enumeration, no device is opened. Skipped entirely while a transfer is running.
 DEVICE_POLL_SECONDS = 4
 
+# Interface 2 is the only one safe to hold.
+#
+# The libusb backend detaches the kernel HID driver from whatever interface it
+# opens, and on the RT100 the input collections are not spread evenly:
+#
+#   0 -- main keyboard. Holding it interferes with typing.
+#   1 -- Consumer Control (the volume knob), System Control, a second keyboard
+#        collection and a mouse collection. Holding it kills the volume knob
+#        and media keys for as long as the handle is open. Measured 2026-07-31:
+#        6 input nodes drop to 1, and return the moment the handle closes.
+#   2 -- no input collections at all, and it accepts every command this app
+#        sends: lighting, profiles, screen images, clock, CPU and temperature.
+#
+# OpenRGB reaches the same conclusion independently -- its Epomaker detector
+# registers this VID/PID on interface 2.
+DEFAULT_INTERFACE = 2
+
 # --------------------------------------------------------------------------- #
 # Library imports, deferred so a missing dependency becomes a UI message
 # rather than a traceback on stderr.
@@ -312,7 +329,7 @@ class RT100(EpomakerController):
     block instead.
     """
 
-    def __init__(self, config, interface: int = 1) -> None:
+    def __init__(self, config, interface: int = DEFAULT_INTERFACE) -> None:
         self._interface = interface
         self._pid: int | None = None
         super().__init__(config, dry_run=False)
@@ -848,7 +865,12 @@ class Window(Adw.ApplicationWindow):
         self.set_default_size(760, 720)
 
         self.settings = load_settings()
-        self.interface = int(self.settings.get("interface", 1))
+        self.interface = int(self.settings.get("interface", DEFAULT_INTERFACE))
+        if self.interface == 1 and not self.settings.get("iface1_migrated"):
+            # 1 was this app's default before the volume-knob problem was
+            # found, so a stored 1 is almost certainly ours, not a choice.
+            self.interface = DEFAULT_INTERFACE
+            self.settings["iface1_migrated"] = True
         self.backslash_index_name = self.settings.get(
             "backslash_index_name", BACKSLASH_CANDIDATES[0]
         )
@@ -2112,7 +2134,7 @@ def main() -> int:
         args = [a for a in sys.argv[1:] if a != "--daemon"]
         sensor = args[0] if args else None
         settings = load_settings()
-        return run_daemon(sensor, int(settings.get("interface", 1)))
+        return run_daemon(sensor, int(settings.get("interface", DEFAULT_INTERFACE)))
     return Application().run(sys.argv)
 
 
