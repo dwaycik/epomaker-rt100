@@ -472,8 +472,17 @@ class UserUnit:
                               capture_output=True, text=True, timeout=30)
 
     def exists(self) -> bool:
-        path = Path(GLib.get_user_config_dir()) / "systemd" / "user" / self.name
-        return path.exists()
+        """Ask systemd, rather than guessing where the unit file lives.
+
+        A unit installed by the package lands in /usr/lib/systemd/user/, while
+        install-service.sh writes ~/.config/systemd/user/. Checking only the
+        latter made the service controls grey out on every packaged install.
+        """
+        try:
+            result = self._run("list-unit-files", "--no-legend", self.name)
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return result.returncode == 0 and self.name in result.stdout
 
     def is_active(self) -> bool:
         try:

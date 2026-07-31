@@ -712,8 +712,17 @@ class UserUnit:
         )
 
     def exists(self) -> bool:
-        base = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
-        return (base / "systemd" / "user" / self.name).exists()
+        """Ask systemd, rather than guessing where the unit file lives.
+
+        A unit installed by the package lands in /usr/lib/systemd/user/, while
+        install-service.sh writes ~/.config/systemd/user/. Checking only the
+        latter made the service controls grey out on every packaged install.
+        """
+        try:
+            result = self._run("list-unit-files", "--no-legend", self.name)
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return result.returncode == 0 and self.name in result.stdout
 
     def _quiet(self, *args: str) -> bool:
         try:
