@@ -35,7 +35,6 @@ dependencies = [
     "psutil>=6.0.0",
     "numpy<2.0",
     "opencv-python-headless",
-    "appdirs",
     "click",
     "python-dateutil",
 ]
