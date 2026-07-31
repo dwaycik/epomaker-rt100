@@ -1,19 +1,31 @@
 # epomaker-rt100-gtk
 
-A small GTK4 / libadwaita desktop app to control an **Epomaker RT100** keyboard
-on Linux: backlight colours, the firmware's built-in light effects, per-key
-colours from a clickable layout, and still images or animated GIFs on the
-little screen.
-
-Single window, single process, one Python file. No telemetry, no network
-access, and it never invokes `sudo`.
-
-It is a **wrapper** around [`EpomakerController`](https://github.com/strodgers/epomaker-controller)
-by Sam Rodgers, which does all the actual USB HID work. This project adds a
-native desktop UI, a US ANSI layout, and the operational glue (interface
-selection, daemon handling, image fitting) that the library leaves to callers.
+Linux desktop control for the **Epomaker RT100** — the little screen first:
+still images, animated GIFs, and a live clock / CPU / temperature readout.
+Per-key RGB and the firmware's built-in light effects come along too.
 
 ![US ANSI key map](docs/ansi-layout.png)
+
+## Do you actually need this?
+
+Be honest with yourself about what you want to control:
+
+| If you want… | Use |
+|---|---|
+| **Only RGB lighting** | [**OpenRGB**](https://openrgb.org/) — it already supports this exact keyboard (VID `0x3151`, PID `0x4010`, registered as *"Epomaker TH80 Pro"*). Mature, cross-platform, and it does not need any of this. |
+| **Key remapping or macros** | [**sharkfin**](https://github.com/dniminenn/sharkfin) — covers ~950 ROYUAN-based boards. No screen support. |
+| **The screen** — images, GIFs, clock, CPU, temperature | This, or the [`epomakercontroller`](https://github.com/strodgers/epomaker-controller) CLI it is built on. |
+
+The screen is the gap. OpenRGB and sharkfin do not touch it, and
+`epomaker-controller` is the only Linux implementation of that protocol — this
+project is a native desktop front end for it, plus the US ANSI layout and system
+integration the library leaves to callers.
+
+**Credit where it is due:** all USB HID work is
+[`strodgers/epomaker-controller`](https://github.com/strodgers/epomaker-controller)
+by Sam Rodgers, MIT licensed. This is a downstream application that depends on
+it — not a fork. `.upstream-commit` pins the exact commit used, so upstream
+fixes arrive by bumping one file.
 
 ## Features
 
