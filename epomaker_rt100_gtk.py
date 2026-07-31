@@ -575,7 +575,7 @@ class DaemonGuard:
                 "Stop it yourself and try again."
             )
         where = "user" if self.scope == ["--user"] else "system"
-        return f"Stopped {self.unit} ({where}) for the upload."
+        return f"Paused {self.unit} ({where})."
 
     def restart(self) -> str | None:
         if not self.was_active:
@@ -584,7 +584,7 @@ class DaemonGuard:
         self.was_active = False
         if result.returncode != 0:
             return f"Could not restart {self.unit}: {result.stderr.strip()}"
-        return f"Restarted {self.unit}."
+        return f"Resumed {self.unit}."
 
 
 # --------------------------------------------------------------------------- #
