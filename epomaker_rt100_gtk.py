@@ -320,6 +320,24 @@ class RT100(EpomakerController):
             self.device = None
             raise DevicePermission(str(exc)) from exc
 
+    @property
+    def keymap_config(self):
+        """The keymap Config, across the 0.0.8 / 0.0.9 split.
+
+        0.0.8 put config_layout/config_keymap directly on the controller. 0.0.9
+        moved them behind an EpomakerConfig wrapper at ``self.config``.
+        """
+        wrapper = getattr(self, "config", None)
+        keymap = getattr(wrapper, "config_keymap", None)
+        if keymap is None:
+            keymap = getattr(self, "config_keymap", None)
+        if keymap is None:
+            raise RuntimeError(
+                "This build of EpomakerController exposes neither "
+                "controller.config.config_keymap nor controller.config_keymap."
+            )
+        return keymap
+
     def send_gif_paced(self, gif_path: str) -> None:
         """Upload an animated GIF using the library's native GIF command.
 
@@ -1313,6 +1331,12 @@ class Window(Adw.ApplicationWindow):
             if label is None:
                 key = self._key_by_name(name)
                 label = (key.display_str if key else name).strip() or name
+            if name == "BACKSLASH":
+                # The cap is whatever is printed on your keyboard. Don't inherit
+                # the display_str of whichever candidate index is being tested --
+                # aliasing to HASH would relabel it "#", which is an ISO key that
+                # does not exist on this board.
+                label = "\\"
             button.set_label(label)
             index = self._index_for(name)
             if index is None:
@@ -1397,7 +1421,7 @@ class Window(Adw.ApplicationWindow):
         )
 
     def _send_single_key(self, dev: RT100, index: int | None) -> str:
-        keys = KeyboardKeys(dev.config_keymap)
+        keys = KeyboardKeys(dev.keymap_config)
         mapping = EpomakerKeyRGBCommand.KeyMap(keys)
         for key in keys:
             mapping[key] = (0, 0, 0) if key.value != index else (255, 255, 255)
@@ -1705,7 +1729,7 @@ class Window(Adw.ApplicationWindow):
         wanted = dict(self.key_colours)
 
         def work(dev: RT100) -> str:
-            keys = KeyboardKeys(dev.config_keymap)
+            keys = KeyboardKeys(dev.keymap_config)
             mapping = EpomakerKeyRGBCommand.KeyMap(keys)
             index_to_colour: dict[int, tuple[int, int, int]] = {}
             for name, colour in wanted.items():
