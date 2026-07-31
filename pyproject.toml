@@ -3,14 +3,15 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "epomaker-rt100-gtk"
-version = "0.1.0"
-description = "GTK4/libadwaita control panel for the Epomaker RT100 keyboard"
+name = "epomaker-rt100"
+version = "0.2.0"
+description = "Control the Epomaker RT100 keyboard on Linux — screen, GIFs, backlight"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-keywords = ["epomaker", "rt100", "keyboard", "rgb", "gtk4", "libadwaita"]
+keywords = ["epomaker", "rt100", "keyboard", "rgb", "gtk4", "libadwaita", "tui"]
 classifiers = [
+    "Environment :: Console :: Curses",
     "Environment :: X11 Applications :: GTK",
     "Intended Audience :: End Users/Desktop",
     "License :: OSI Approved :: MIT License",
@@ -18,32 +19,40 @@ classifiers = [
     "Programming Language :: Python :: 3",
 ]
 
-# PyGObject is deliberately NOT listed. Building it from PyPI needs the full
-# GTK/GObject toolchain, and every target distro ships a working binding
-# already. Install python-gobject / python3-gi from your package manager and
-# create the venv with --system-site-packages. See README.md.
+# The core needs no UI toolkit. Front ends are optional extras, so you install
+# only the one you want:
 #
-# EpomakerController pins hidapi==0.14.0, which does not build on Python 3.13+,
-# so it is installed with --no-deps in the documented setup rather than being
-# depended on here.
-dependencies = []
-
-[project.optional-dependencies]
-# What `pip install --no-deps EpomakerController` leaves you to provide.
-library = [
-    "EpomakerController>=0.0.8",
+#   pip install .[tui]    terminal, works over SSH and in a tty
+#   pip install .[gtk]    desktop window
+#   pip install .[all]    both
+#
+# EpomakerController is NOT listed. 0.0.9 has the GIF support and the relaxed
+# hidapi pin but is unreleased, so it is installed from the commit recorded in
+# .upstream-commit -- see README.md.
+dependencies = [
+    "hidapi>=0.15.0",
+    "pillow",
+    "psutil>=6.0.0",
+    "numpy<2.0",
+    "opencv-python-headless",
     "appdirs",
     "click",
-    "gpustat",
-    "numpy",
-    "opencv-python-headless",
-    "psutil",
     "python-dateutil",
-    "hidapi>=0.15.0",
 ]
 
+[project.optional-dependencies]
+tui = ["textual>=1.0"]
+# PyGObject is deliberately absent: building it from PyPI needs the full
+# GTK/GObject toolchain, and every target distro ships a working binding.
+# Install python-gobject / python3-gi from your package manager and create the
+# venv with --system-site-packages. See README.md.
+gtk = []
+all = ["epomaker-rt100[tui]"]
+
 [project.scripts]
+epomaker-rt100 = "epomaker_rt100.tui:main"
 epomaker-rt100-gtk = "epomaker_rt100_gtk:main"
 
 [tool.setuptools]
+packages = ["epomaker_rt100"]
 py-modules = ["epomaker_rt100_gtk"]
