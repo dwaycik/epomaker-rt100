@@ -2,7 +2,8 @@
 
 A small GTK4 / libadwaita desktop app to control an **Epomaker RT100** keyboard
 on Linux: backlight colours, the firmware's built-in light effects, per-key
-colours from a clickable layout, and a still image on the little screen.
+colours from a clickable layout, and still images or animated GIFs on the
+little screen.
 
 Single window, single process, one Python file. No telemetry, no network
 access, and it never invokes `sudo`.
@@ -23,16 +24,46 @@ selection, daemon handling, image fitting) that the library leaves to callers.
 - Per-key colours from a clickable layout. Select any number of keys, pick a
   colour, then send. Selections and colours persist between runs.
 
+**System info**
+- Sync the keyboard's clock, and show live CPU and temperature.
+- Start/stop a background updater, and enable it at login.
+
 **Screen**
 - File picker with a live, actual-size preview.
 - Three fitting choices — show the whole image (letterboxed), fill and crop, or
   stretch — with a configurable bar colour.
-- GIFs are accepted and sent as a **single chosen frame**, with a frame picker.
-  See [GIFs and animation](#gifs-and-animation) — the screen cannot be animated
-  from Linux.
+- **Animated GIFs play on the screen**, natively — see
+  [GIFs and animation](#gifs-and-animation). Or send one chosen frame as a
+  full-resolution still.
 - Progress by packet during upload.
 - Automatically re-sends the picture after a backlight change, because writing
   key colours clears the screen. Switchable.
+
+## Screen updater (clock, CPU, temperature)
+
+The screen can show the time, CPU load and a temperature sensor, kept current by
+a small background service:
+
+```bash
+./install-service.sh                 # defaults to the coretemp-0 CPU package sensor
+./install-service.sh --list-sensors  # see what this machine offers
+./install-service.sh nvme-0          # or pick another
+./install-service.sh --uninstall
+```
+
+Then use the **System info** tab to start it, stop it, enable it at login, choose
+the sensor, and sync the clock. The keyboard has no battery-backed clock, so it
+shows whatever the host last sent and resets when unplugged.
+
+It is a **user** unit, deliberately: starting and stopping it needs no
+authorisation, so the GUI can pause it around other operations without a polkit
+prompt and without ever touching sudo. Because it holds the HID interface, the
+app stops it around every keyboard operation and restarts it afterwards.
+
+The unit runs `epomaker_rt100_gtk.py --daemon`, not upstream's
+`epomakercontroller start-daemon`. Upstream's CLI opens the device with
+`hid.device().open(vendor_id, product_id)`, which takes **interface 0** — the one
+carrying key input — so it interferes with typing.
 
 ## Launcher entry
 
@@ -58,24 +89,28 @@ rofi, fuzzel, GNOME, Plasma).
 
 ### Arch / CachyOS
 
-The library pins `hidapi==0.14.0`, which **cannot build on Python 3.13+**
-(`error: unknown file type '.pxd' (from 'chid.pxd')` under modern setuptools).
-Use the distro binding instead of building it:
+0.0.9 relaxed the old `hidapi==0.14.0` pin, which could not build on Python
+3.13+ (`error: unknown file type '.pxd'` under modern setuptools). Another reason
+to take git over PyPI.
 
 ```bash
-sudo pacman -S --needed python-gobject gtk4 libadwaita python-hidapi
+sudo pacman -S --needed python-gobject gtk4 libadwaita python-pillow
 
 git clone <this repo> epomaker-rt100-gtk && cd epomaker-rt100-gtk
 python -m venv --system-site-packages .venv
-.venv/bin/pip install --no-deps EpomakerController
-.venv/bin/pip install appdirs click gpustat numpy opencv-python-headless \
-    psutil python-dateutil
+.venv/bin/pip install 'hidapi>=0.15.0' appdirs click gpustat 'numpy<2.0' \
+    opencv-python-headless psutil python-dateutil pillow
+.venv/bin/pip install --no-deps "git+https://github.com/strodgers/epomaker-controller@$(cat .upstream-commit)"
 ```
 
-`--system-site-packages` is what lets the venv see PyGObject and
-`python-hidapi`. `--no-deps` skips the unbuildable pin. If you would rather not
-use the distro package, `pip install hidapi==0.15.0` also works — it builds
-cleanly and behaves identically here.
+**Install the library from git, not PyPI.** PyPI's newest is 0.0.8; animated GIF
+support arrived in 0.0.9, which has not been released. `.upstream-commit` pins
+the exact commit this was built and tested against, so every machine gets an
+identical build. `--no-deps` is used because 0.0.9's metadata omits Pillow (which
+its own GIF code imports) and would otherwise re-resolve pins unnecessarily.
+
+`--system-site-packages` is what lets the venv see PyGObject, which is painful
+to build from PyPI and ships working on every target distro.
 
 ### Debian / Ubuntu
 
@@ -83,9 +118,9 @@ cleanly and behaves identically here.
 sudo apt install -y python3-gi python3-gi-cairo gir1.2-gtk-4.0 \
     gir1.2-adw-1 libhidapi-libusb0 libusb-1.0-0-dev
 python3 -m venv --system-site-packages .venv
-.venv/bin/pip install --no-deps EpomakerController
-.venv/bin/pip install appdirs click gpustat numpy opencv-python-headless \
-    psutil python-dateutil hidapi
+.venv/bin/pip install 'hidapi>=0.15.0' appdirs click gpustat 'numpy<2.0' \
+    opencv-python-headless psutil python-dateutil pillow
+.venv/bin/pip install --no-deps "git+https://github.com/strodgers/epomaker-controller@$(cat .upstream-commit)"
 ```
 
 ### Permissions (required)
@@ -127,12 +162,12 @@ these commands rather than trying to run them.
 carries key input and using it interferes with normal typing. The app defaults
 to **interface 1** and the choice is in the header bar.
 
-The library has no interface argument — v0.0.8 finds a path by matching
-`DEVICE_DESCRIPTION_REGEX` (`"ROYUAN .* System Control"`) against
-`/sys/class/input/*/device/name`, filtering on Wired/Wireless and taking the
-first hit. That lands on interface 1 in practice, but it is implicit and
-unselectable, so `RT100._find_device_path` here replaces it with a direct
-`hid.enumerate()` filter on `interface_number`.
+The library has no interface argument, and 0.0.9 made this worse rather than
+better: it opens with `hid.device().open(vendor_id, product_id)`, which takes
+whatever hidapi enumerates first — **interface 0**. So `RT100._open_device` here
+replaces it with a path-based open, filtering `hid.enumerate()` on
+`interface_number`. This is why the background updater runs this app's
+`--daemon` mode rather than upstream's CLI.
 
 **Screen size is 162 × 173.** Read from the library's
 `commands/data/constants.py` (`IMAGE_DIMENSIONS`), not guessed. That value is a
@@ -162,25 +197,37 @@ the device is closed in a `finally` block instead.
 
 ## GIFs and animation
 
-**The screen cannot be animated from Linux.** The RT100 firmware supports it —
-Epomaker's own Windows/Mac software does it via Screen → Select Picture — but the
-protocol for it has not been publicly reverse-engineered:
+Animated GIFs **do** play on the screen, natively. Upstream added
+`EpomakerGifCommand` in **0.0.9**, implementing the multi-frame protocol sniffed
+from the vendor software: an `0xa5` init report carrying frame count, frame delay
+and per-frame size, then 1001 reports per frame.
 
-- `EpomakerController` lists "Upload GIFs" under **TODO**, and its
-  `SUPPORTED_FORMATS` excludes `.gif` entirely.
-- `tejmar/epomaker-controller` does have GIF import, but gated behind its
-  `dynatab_screen` capability — the DynaTab's 60×9 dot-matrix. The RT100 gets
-  `rt100_screen`, documented as "162×173 status-screen **image** upload".
+This is why the install instructions point at **git, not PyPI** — the newest
+release on PyPI is 0.0.8, which predates it. (Upstream's README still lists
+"Upload GIFs" under TODO; the README is simply stale.)
 
-So this app accepts a `.gif`, extracts its frames, and lets you pick **one** to
-send as a still. The file never reaches the library — only the PNG rendered from
-your chosen frame does. Frame extraction uses Pillow when it is installed;
-without it, GdkPixbuf still returns the first frame, so GIFs stay usable.
+Limits, all from the library's own code:
 
-Uploading frames in sequence is not a workaround: each upload is 1002 packets and
-makes the keyboard unresponsive while it runs. Real animation would mean
-capturing USB traffic from the Windows software during a GIF upload and decoding
-the command it uses.
+- **Up to 56 frames**, at **15 fps**. Longer GIFs are subsampled, and the app
+  tells you how many of how many will be sent.
+- **Animations are 128×128, not 162×173.** `best_gif_dimensions()` fits the
+  source into the screen and then floors each axis to a multiple of 64, because
+  the firmware's animation framebuffer is 4K page-aligned and a non-aligned frame
+  size produces vertical line artifacts. Within 162×173 the only multiple of 64
+  available is 128. The preview renders at the real upload size so you can see
+  the difference before sending.
+
+**Upstream bug this app works around:** `best_gif_dimensions()` floors the short
+axis of a wide source to zero — `800×200` returns `(128, 0)`. That passes its own
+`w*h*2 % 4096 == 0` check and uploads nothing usable. This app pre-renders every
+frame to exactly 128×128 using your chosen fitting, so the library always gets a
+square source and the bug cannot trigger.
+
+Turn **"Play the animation"** off to send a single frame as a full-resolution
+still instead; the frame picker appears when you do.
+
+Animation needs Pillow, which the library's own `EpomakerGifCommand` imports but
+does not declare as a dependency. Without it, stills still work.
 
 ## Observed hardware behaviour
 

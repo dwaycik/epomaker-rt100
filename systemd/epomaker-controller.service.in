@@ -1,0 +1,19 @@
+[Unit]
+Description=Epomaker RT100 screen updater (clock, CPU, temperature)
+Documentation=https://github.com/strodgers/epomaker-controller
+# Only meaningful once a graphical session exists, since it is a user unit.
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=@PYTHON@ @SCRIPT@ --daemon @SENSOR@
+# The keyboard is frequently unplugged; keep retrying rather than failing out.
+Restart=on-failure
+RestartSec=10
+# It holds the HID interface, so it must yield promptly when the GUI stops it
+# to make a change. The library closes the device on SIGTERM.
+KillSignal=SIGTERM
+TimeoutStopSec=10
+
+[Install]
+WantedBy=default.target

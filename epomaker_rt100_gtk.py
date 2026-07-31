@@ -35,18 +35,58 @@ gi.require_version("GdkPixbuf", "2.0")
 from gi.repository import Adw, Gdk, GdkPixbuf, Gio, GLib, Gtk  # noqa: E402
 
 APP_ID = "io.github.dano.EpomakerRT100"
-SETTINGS_PATH = Path(GLib.get_user_config_dir()) / "epomaker-rt100-gtk" / "settings.json"
+
+# EPOMAKER_RT100_CONFIG_DIR redirects the settings file. Its reason for existing
+# is test isolation: without it, running the validation harness scribbles over
+# the real user's saved preferences.
+SETTINGS_PATH = (
+    Path(os.environ.get("EPOMAKER_RT100_CONFIG_DIR")
+         or Path(GLib.get_user_config_dir()) / "epomaker-rt100-gtk")
+    / "settings.json"
+)
+
+# How often to re-check whether the keyboard is present. Cheap: a libusb
+# enumeration, no device is opened. Skipped entirely while a transfer is running.
+DEVICE_POLL_SECONDS = 4
 
 # --------------------------------------------------------------------------- #
 # Library imports, deferred so a missing dependency becomes a UI message
 # rather than a traceback on stderr.
 # --------------------------------------------------------------------------- #
 
+def _stabilise_library_paths() -> Path:
+    """Work around upstream 0.0.9's working-directory-relative paths.
+
+    epomakercontroller/configs/constants.py hard-codes three relative paths:
+
+      PATH_TO_DEFAULT_CONFIG = "src/epomakercontroller/configs/default.json"
+      CONFIG_DIRECTORY       = ".epomaker-controller"
+      TMP_FOLDER             = os.path.abspath("./.epomaker_controller")
+
+    The first only resolves inside an upstream source checkout, so
+    load_main_config() raises FileNotFoundError anywhere else -- including a
+    systemd service and any app-menu launch, where the working directory is the
+    home directory. The second makes the config per-working-directory. The third
+    is worse: constants.py runs os.mkdir on it at *import time*, littering
+    whichever directory the process happened to start in.
+
+    So: move to a runtime directory of our own before importing, then repoint
+    the constants at the files as actually installed.
+    """
+    runtime = Path(GLib.get_user_data_dir()) / "epomaker-rt100-gtk" / "runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    os.chdir(runtime)
+    return runtime
+
+
+RUNTIME_DIR = _stabilise_library_paths()
+
 IMPORT_ERROR: str | None = None
 try:
     import hid  # provided by the `hidapi` package, a dependency of the library
 
     from epomakercontroller.commands import (
+        EpomakerGifCommand,
         EpomakerImageCommand,
         EpomakerKeyRGBCommand,
     )
@@ -58,6 +98,24 @@ try:
     from epomakercontroller.configs.configs import load_main_config
     from epomakercontroller.epomakercontroller import EpomakerController
     from epomakercontroller.utils.keyboard_keys import KeyboardKey, KeyboardKeys
+
+    # Repoint the relative constants at the real installed locations. Both the
+    # constants module and configs.py need patching, because configs.py does
+    # `from .constants import PATH_TO_DEFAULT_CONFIG`, binding its own name.
+    import epomakercontroller.configs.configs as _epo_configs
+    import epomakercontroller.configs.constants as _epo_constants
+
+    _installed_default = (
+        Path(_epo_configs.__file__).parent / "default.json"
+    )
+    if _installed_default.exists():
+        for _module in (_epo_constants, _epo_configs):
+            if hasattr(_module, "PATH_TO_DEFAULT_CONFIG"):
+                _module.PATH_TO_DEFAULT_CONFIG = str(_installed_default)
+    _config_home = str(Path.home() / ".epomaker-controller")
+    for _module in (_epo_constants, _epo_configs):
+        if hasattr(_module, "CONFIG_DIRECTORY"):
+            _module.CONFIG_DIRECTORY = _config_home
 except Exception as exc:  # pragma: no cover - environment problem, not logic
     IMPORT_ERROR = f"{type(exc).__name__}: {exc}"
 
@@ -230,22 +288,50 @@ class RT100(EpomakerController):
         self._pid = super()._find_product_id()
         return self._pid
 
-    def _find_device_path(self) -> bytes | None:
-        for entry in hid.enumerate(self.vendor_id, self._pid):
-            if entry.get("interface_number") == self._interface:
-                return entry["path"]
-        return None
+    def _open_device(self, product_id: int) -> None:
+        """Open a specific interface, and raise instead of swallowing failures.
 
-    def _open_device(self, device_path: bytes) -> None:
-        # The base implementation swallows the IOError, prints a sudo
-        # suggestion and then trips a bare `assert`, so a permission problem
-        # arrives as an AssertionError. Replaced with typed errors.
+        0.0.9 opens with ``hid.device().open(vendor_id, product_id)``, which
+        takes whatever interface hidapi enumerates first -- interface 0, the one
+        that carries key input and interferes with typing. There is no way to
+        ask for another. So the path-based open lives here instead, filtering
+        hid.enumerate() on interface_number.
+
+        Upstream also logs the IOError and sets self.device = None rather than
+        raising, so a permission problem would surface later as a confusing
+        AssertionError. Typed errors are raised here instead.
+        """
+        vendor_id = self.config.vendor_id
+        path = None
+        for entry in hid.enumerate(vendor_id, product_id):
+            if entry.get("interface_number") == self._interface:
+                path = entry["path"]
+                break
+        if path is None:
+            self.device = None
+            raise DeviceMissing(
+                f"Interface {self._interface} is not present on the keyboard."
+            )
+
         self.device = hid.device()
         try:
-            self.device.open_path(device_path)
+            self.device.open_path(path)
         except (IOError, OSError) as exc:
             self.device = None
             raise DevicePermission(str(exc)) from exc
+
+    def send_gif_paced(self, gif_path: str) -> None:
+        """Upload an animated GIF using the library's native GIF command.
+
+        New in upstream 0.0.9 (not on PyPI): EpomakerGifCommand implements the
+        multi-frame protocol, sniffed from the vendor software -- init report
+        0xa5 carrying frame count, frame delay and per-frame size, then 1001
+        reports per frame. Up to 56 frames at 15 fps.
+        """
+        command = EpomakerGifCommand.EpomakerGifCommand(gif_path)
+        if not command.encode_gif():
+            raise RuntimeError("The library could not encode that GIF.")
+        self._send_command(command)
 
     def send_paced(
         self,
@@ -279,6 +365,8 @@ def scan_bus() -> dict[str, object]:
     """Report what RT100 hardware is on the bus, without opening anything."""
     wired_ids = [0x4010, 0x4015]
     wireless_ids = [0x4011, 0x4016]
+    if not hasattr(hid, "enumerate"):  # pragma: no cover
+        return {"wired": [], "wireless": [], "interfaces": []}
     wired: list[dict] = []
     wireless: list[dict] = []
     for pid in wired_ids:
@@ -295,6 +383,83 @@ def scan_bus() -> dict[str, object]:
 # is-active, stop, run, start again in a finally block. User units are tried
 # first because stopping those needs no authorisation at all.
 # --------------------------------------------------------------------------- #
+
+
+class UserUnit:
+    """Talk to a systemd --user unit.
+
+    User scope only, deliberately: stopping and starting a user unit needs no
+    authorisation, so the app never has to escalate. A system unit would put a
+    polkit prompt in the middle of an upload.
+    """
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    def _run(self, *args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(["systemctl", "--user", *args],
+                              capture_output=True, text=True, timeout=30)
+
+    def exists(self) -> bool:
+        path = Path(GLib.get_user_config_dir()) / "systemd" / "user" / self.name
+        return path.exists()
+
+    def is_active(self) -> bool:
+        try:
+            return self._run("is-active", "--quiet", self.name).returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            return False
+
+    def is_enabled(self) -> bool:
+        try:
+            return self._run("is-enabled", "--quiet", self.name).returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            return False
+
+    def start(self) -> str | None:
+        result = self._run("start", self.name)
+        return None if result.returncode == 0 else result.stderr.strip()
+
+    def stop(self) -> str | None:
+        result = self._run("stop", self.name)
+        return None if result.returncode == 0 else result.stderr.strip()
+
+    def set_enabled(self, enabled: bool) -> str | None:
+        result = self._run("enable" if enabled else "disable", self.name)
+        return None if result.returncode == 0 else result.stderr.strip()
+
+
+def list_temp_sensors() -> list[tuple[str, str]]:
+    """Return (key, human label) for each temperature sensor.
+
+    Keys match what the library's get_device_temp() expects -- "<chip>-<index>",
+    the same scheme as its own _get_temp_devices().
+    """
+    try:
+        import psutil
+    except ImportError:
+        return []
+    out: list[tuple[str, str]] = []
+    try:
+        readings = psutil.sensors_temperatures()
+    except Exception:
+        return []
+    for chip, entries in readings.items():
+        for index, entry in enumerate(entries):
+            key = f"{chip}-{index}"
+            label = entry.label or chip
+            out.append((key, f"{label} ({key}) — {entry.current:.0f}°C"))
+    return out
+
+
+def read_sensor(key: str) -> float | None:
+    try:
+        import psutil
+        chip, _, index = key.rpartition("-")
+        entries = psutil.sensors_temperatures().get(chip, [])
+        return entries[int(index)].current
+    except Exception:
+        return None
 
 
 @dataclass
@@ -406,15 +571,72 @@ def load_frames(path: str) -> list[GdkPixbuf.Pixbuf]:
         return [GdkPixbuf.Pixbuf.new_from_file(path)]
 
 
-def fit_pixbuf(source: GdkPixbuf.Pixbuf, mode: str, bg: Gdk.RGBA) -> GdkPixbuf.Pixbuf:
-    """Render `source` into an IMAGE_DIMENSIONS canvas.
+# Animated uploads go at 128x128, not the still image's 162x173.
+#
+# The library derives GIF dimensions with best_gif_dimensions(): it scales the
+# source to fit 162x173, then floors each axis to a multiple of 64, because the
+# firmware's animation framebuffer is 4K page-aligned and a non-aligned frame
+# size produces vertical line artifacts. Within 162x173 the only multiple of 64
+# available on each axis is 128, so 128x128 is the largest legal frame.
+#
+# It also has a bug: a wide source floors the short axis to zero
+# (800x200 -> (128, 0)), which passes its own `% 4096` check and uploads
+# nothing usable. Pre-rendering every frame to exactly 128x128 here avoids that
+# entirely -- best_gif_dimensions(128, 128) returns (128, 128) -- and applies
+# the user's chosen fitting instead of an unconditional squash.
+GIF_DIMENSIONS = (128, 128)
+GIF_MAX_FRAMES = 56  # the library subsamples above this
+GIF_FRAMERATE = 15
+
+try:
+    import PIL  # noqa: F401
+    HAVE_PILLOW = True
+except ImportError:
+    # The library's own EpomakerGifCommand imports PIL, so without it animation
+    # is unavailable either way -- but stills must keep working.
+    HAVE_PILLOW = False
+
+
+def render_gif(
+    frames: list[GdkPixbuf.Pixbuf], mode: str, bg: Gdk.RGBA, out_path: str
+) -> int:
+    """Write `frames` out as a GIF the library can upload. Returns frame count."""
+    from PIL import Image
+
+    width, height = GIF_DIMENSIONS
+    step = max(1, len(frames) / GIF_MAX_FRAMES)
+    picked = [frames[min(int(i * step), len(frames) - 1)]
+              for i in range(min(len(frames), GIF_MAX_FRAMES))]
+
+    images = []
+    for frame in picked:
+        fitted = fit_pixbuf(frame, mode, bg, size=GIF_DIMENSIONS)
+        images.append(Image.frombytes(
+            "RGB", (width, height), bytes(fitted.get_pixels()), "raw", "RGB",
+            fitted.get_rowstride(), 1,
+        ))
+
+    images[0].save(
+        out_path, save_all=True, append_images=images[1:],
+        duration=int(1000 / GIF_FRAMERATE), loop=0, optimize=False,
+    )
+    return len(images)
+
+
+def fit_pixbuf(
+    source: GdkPixbuf.Pixbuf,
+    mode: str,
+    bg: Gdk.RGBA,
+    size: tuple[int, int] | None = None,
+) -> GdkPixbuf.Pixbuf:
+    """Render `source` into an IMAGE_DIMENSIONS canvas, or `size` if given.
 
     IMAGE_DIMENSIONS comes straight from the library
     (commands/data/constants.py) and is a cv2.resize dsize, so it reads
     (width, height). The library's own encode_image does a bare resize with no
     aspect handling, which is why the fitting happens here instead.
     """
-    width, height = IMAGE_DIMENSIONS
+    width, height = size or IMAGE_DIMENSIONS
     if source.get_has_alpha():
         flat = GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB, False, 8,
                                     source.get_width(), source.get_height())
@@ -544,11 +766,16 @@ class Window(Adw.ApplicationWindow):
         self.key_colours: dict[str, str] = dict(self.settings.get("key_colours", {}))
         self.picked: set[str] = set()
         self.busy = False
+        self.device_ready = False
+        self.unavailable_reason = ""
+        self.unit = UserUnit(
+            os.environ.get("EPOMAKER_SERVICE_NAME", "epomaker-controller.service")
+        )
         self.keyboard_keys = None
         self.image_path: str | None = None
         self.frames: list[GdkPixbuf.Pixbuf] = []
         self.frame_index = 0
-        self._last_sent: GdkPixbuf.Pixbuf | None = None
+        self._last_sent: tuple[str, object] | None = None
         self.fit_mode = self.settings.get("fit_mode", "letterbox")
 
         self.keycap_css = Gtk.CssProvider()
@@ -599,7 +826,11 @@ class Window(Adw.ApplicationWindow):
         self.stack.add_titled_with_icon(
             self._screen_page(), "screen", "Screen", "image-x-generic-symbolic"
         )
+        self.stack.add_titled_with_icon(
+            self._system_page(), "system", "System info", "utilities-system-monitor-symbolic"
+        )
         self.refresh_device()
+        GLib.timeout_add_seconds(DEVICE_POLL_SECONDS, self.poll_device)
 
     # ---------------------------------------------------------------- pages --
 
@@ -803,14 +1034,21 @@ class Window(Adw.ApplicationWindow):
         self.file_row.add_suffix(browse)
         group.add(self.file_row)
 
-        # GIFs are accepted, but as a single frame. The screen cannot be made to
-        # animate: no public implementation of the RT100's animation protocol
-        # exists. Epomaker's own Windows/Mac software is the only thing that does
-        # it. Sending frames in sequence is not a workaround -- each upload is
-        # 1002 packets and freezes the keyboard while it runs.
+        self.animate_row = Adw.SwitchRow(
+            title="Play the animation",
+            subtitle=(
+                f"Sends every frame at {GIF_FRAMERATE} fps. Turn off to send one "
+                "still frame instead."
+            ),
+            active=True,
+            visible=False,
+        )
+        self.animate_row.connect("notify::active", self.on_animate_changed)
+        group.add(self.animate_row)
+
         self.frame_row = Adw.SpinRow.new_with_range(1, 1, 1)
         self.frame_row.set_title("Frame")
-        self.frame_row.set_subtitle("Animated files are sent as one still frame")
+        self.frame_row.set_subtitle("Which single frame to send")
         self.frame_row.set_visible(False)
         self.frame_row.connect("notify::value", self.on_frame_changed)
         group.add(self.frame_row)
@@ -870,6 +1108,16 @@ class Window(Adw.ApplicationWindow):
         self.upload_button.connect("clicked", self.on_upload)
         group.add(self.upload_button)
 
+        # Sits directly under the button, so a disabled button always explains
+        # itself where the user is actually looking.
+        self.upload_reason = Gtk.Label(
+            wrap=True, justify=Gtk.Justification.CENTER, halign=Gtk.Align.CENTER,
+            margin_top=4, visible=False,
+        )
+        self.upload_reason.add_css_class("warning")
+        self.upload_reason.add_css_class("caption")
+        group.add(self.upload_reason)
+
         note = Gtk.Label(
             label=(
                 "Upload sends 1002 packets and takes a few seconds. The keyboard is "
@@ -882,6 +1130,166 @@ class Window(Adw.ApplicationWindow):
         group.add(note)
         page.add(group)
         return page
+
+    def _system_page(self) -> Gtk.Widget:
+        """Clock, CPU and temperature on the keyboard's screen."""
+        page = Adw.PreferencesPage()
+
+        group = Adw.PreferencesGroup(
+            title="Clock",
+            description=(
+                "The keyboard has no battery-backed clock — it shows whatever the "
+                "host last sent, so it drifts and resets when unplugged."
+            ),
+        )
+        row = Adw.ActionRow(
+            title="Set the keyboard's time and date", subtitle="Sends your system clock"
+        )
+        sync = Gtk.Button(label="Sync now", valign=Gtk.Align.CENTER)
+        sync.add_css_class("suggested-action")
+        sync.connect("clicked", self.on_sync_time)
+        row.add_suffix(sync)
+        group.add(row)
+        page.add(group)
+
+        group = Adw.PreferencesGroup(
+            title="CPU and temperature",
+            description=(
+                "The screen's temperature field is meant for weather, but the "
+                "library repurposes it for a sensor on this machine."
+            ),
+        )
+
+        self.sensors = list_temp_sensors()
+        keys = [key for key, _ in self.sensors]
+        self.sensor_row = Adw.ComboRow(
+            title="Temperature sensor",
+            model=Gtk.StringList.new([label for _, label in self.sensors]
+                                     or ["No sensors found"]),
+        )
+        # coretemp-0 is the CPU package sensor -- the one worth watching.
+        preferred = self.settings.get("temp_sensor", "coretemp-0")
+        if preferred in keys:
+            self.sensor_row.set_selected(keys.index(preferred))
+        self.sensor_row.connect("notify::selected", self.on_sensor_changed)
+        group.add(self.sensor_row)
+
+        self.live_row = Adw.ActionRow(
+            title="Right now", subtitle="—",
+            icon_name="utilities-system-monitor-symbolic",
+        )
+        push = Gtk.Button(label="Send once", valign=Gtk.Align.CENTER)
+        push.connect("clicked", self.on_send_stats)
+        self.live_row.add_suffix(push)
+        group.add(self.live_row)
+        page.add(group)
+
+        group = Adw.PreferencesGroup(
+            title="Keep it updating",
+            description=(
+                "Runs a small background service that refreshes the screen "
+                "continuously. It holds the keyboard, so this app stops it "
+                "automatically while making any other change, then starts it again."
+            ),
+        )
+        self.service_row = Adw.SwitchRow(
+            title="Update the screen continuously",
+            subtitle="Checking…",
+        )
+        self.service_row.connect("notify::active", self.on_service_toggled)
+        group.add(self.service_row)
+
+        self.autostart_row = Adw.SwitchRow(
+            title="Start automatically when I log in", subtitle="",
+        )
+        self.autostart_row.connect("notify::active", self.on_autostart_toggled)
+        group.add(self.autostart_row)
+        page.add(group)
+
+        self.refresh_service_state()
+        GLib.timeout_add_seconds(2, self._tick_live)
+        return page
+
+    # ------------------------------------------------------- system info --
+
+    def _tick_live(self) -> bool:
+        if not hasattr(self, "live_row"):
+            return True
+        try:
+            import psutil
+            cpu = int(psutil.cpu_percent())
+        except Exception:
+            cpu = 0
+        key = self.current_sensor()
+        temp = read_sensor(key) if key else None
+        self.live_row.set_subtitle(
+            f"CPU {cpu}%   ·   {temp:.0f}°C" if temp is not None else f"CPU {cpu}%"
+        )
+        return True
+
+    def current_sensor(self) -> str | None:
+        if not self.sensors:
+            return None
+        index = min(self.sensor_row.get_selected(), len(self.sensors) - 1)
+        return self.sensors[index][0]
+
+    def on_sensor_changed(self, *_args) -> None:
+        self.settings["temp_sensor"] = self.current_sensor()
+        self.persist()
+        self._tick_live()
+        if self.unit.is_active():
+            self.toast("Restart the background updater to use the new sensor.")
+
+    def on_sync_time(self, *_args) -> None:
+        self.run_on_device("Clock sync", lambda dev: (dev.send_time(),
+                                                      "Keyboard clock set.")[1])
+
+    def on_send_stats(self, *_args) -> None:
+        key = self.current_sensor()
+
+        def work(dev: RT100) -> str:
+            import psutil
+            cpu = int(psutil.cpu_percent())
+            dev.send_cpu(cpu)
+            temp = read_sensor(key) if key else None
+            if temp is not None:
+                dev.send_temperature(int(temp))
+                return f"Sent CPU {cpu}% and {temp:.0f}°C."
+            return f"Sent CPU {cpu}%."
+
+        self.run_on_device("System stats", work)
+
+    def refresh_service_state(self) -> None:
+        installed = self.unit.exists()
+        active = installed and self.unit.is_active()
+        self.service_row.set_sensitive(installed)
+        self.autostart_row.set_sensitive(installed)
+        self._suppress_service_signal = True
+        self.service_row.set_active(active)
+        self.autostart_row.set_active(installed and self.unit.is_enabled())
+        self._suppress_service_signal = False
+        self.service_row.set_subtitle(
+            ("Running — the screen is being refreshed." if active
+             else "Stopped.") if installed else
+            "Not installed yet. Run ./install-service.sh in the repo."
+        )
+
+    def on_service_toggled(self, *_args) -> None:
+        if getattr(self, "_suppress_service_signal", False):
+            return
+        want = self.service_row.get_active()
+        error = self.unit.start() if want else self.unit.stop()
+        if error:
+            self.show_error(f"Could not {'start' if want else 'stop'} the "
+                            f"background updater.\n\n{error}")
+        GLib.timeout_add(600, lambda: (self.refresh_service_state(), False)[1])
+
+    def on_autostart_toggled(self, *_args) -> None:
+        if getattr(self, "_suppress_service_signal", False):
+            return
+        error = self.unit.set_enabled(self.autostart_row.get_active())
+        if error:
+            self.show_error(f"Could not change autostart.\n\n{error}")
 
     # ------------------------------------------------------------- keycaps --
 
@@ -1016,8 +1424,16 @@ class Window(Adw.ApplicationWindow):
                     "only — plug the keyboard in with its cable.", "warning",
                 )
             else:
-                self.show_banner("No RT100 found on USB. Is it plugged in?", "error")
-            self.set_controls_enabled(False)
+                self.show_banner(
+                    "Keyboard not found on USB. Plug in its USB-C cable — "
+                    "this is checked again every few seconds.", "error",
+                )
+            self.set_controls_enabled(
+                False,
+                "Only the 2.4 GHz dongle is connected — this app needs the USB "
+                "cable." if state["wireless"] else
+                "Keyboard not connected. Plug in its USB-C cable.",
+            )
             return
 
         interfaces = state["interfaces"]
@@ -1032,7 +1448,12 @@ class Window(Adw.ApplicationWindow):
                 f"(found {', '.join(str(i) for i in interfaces)})."
             )
         self.show_banner(note, "warning" if missing else "ok")
-        self.set_controls_enabled(not missing)
+        self.set_controls_enabled(
+            not missing,
+            "" if not missing else
+            f"Interface {self.interface} is not present — pick another in the "
+            "title bar.",
+        )
 
         if self.keyboard_keys is None:
             try:
@@ -1053,10 +1474,46 @@ class Window(Adw.ApplicationWindow):
             self.banner.remove_css_class(css)
         self.banner.add_css_class({"error": "error", "warning": "warning"}.get(kind, "success"))
 
-    def set_controls_enabled(self, enabled: bool) -> None:
+    def set_controls_enabled(self, enabled: bool, reason: str = "") -> None:
         self.device_ready = enabled
-        if hasattr(self, "upload_button"):
-            self.upload_button.set_sensitive(enabled and self.image_path is not None)
+        self.unavailable_reason = reason
+        self._sync_upload_button()
+
+    def _sync_upload_button(self) -> None:
+        """Enable the upload button, and say why not when it is disabled.
+
+        A greyed-out button with the explanation only in a banner at the top of a
+        scrollable page tells the user nothing, because by the time they reach the
+        button the banner is off screen.
+        """
+        if not hasattr(self, "upload_button"):
+            return
+        ready = self.device_ready and self.image_path is not None
+        self.upload_button.set_sensitive(ready)
+
+        if ready:
+            note = ""
+        elif not self.device_ready:
+            note = self.unavailable_reason or "Keyboard not available."
+        else:
+            note = "Choose an image first."
+        self.upload_button.set_tooltip_text(note or None)
+        self.upload_reason.set_label(note)
+        self.upload_reason.set_visible(bool(note))
+
+    def poll_device(self) -> bool:
+        """Re-check presence on a timer so unplug/replug recovers by itself."""
+        if not self.busy:
+            try:
+                state = scan_bus()
+            except Exception:
+                return True
+            signature = (len(state["wired"]), tuple(state["interfaces"]),
+                         len(state["wireless"]))
+            if signature != getattr(self, "_bus_signature", None):
+                self._bus_signature = signature
+                self.refresh_device()
+        return True  # keep the timer alive
 
     def on_interface_changed(self, drop: Gtk.DropDown, *_args) -> None:
         self.interface = drop.get_selected()
@@ -1118,8 +1575,13 @@ class Window(Adw.ApplicationWindow):
                 message = work(device)
                 if payload is not None:
                     GLib.idle_add(self._begin_restore)
-                    self._upload_pixbuf(device, payload)
-                    message += " Screen picture restored."
+                    kind, data = payload
+                    if kind == "gif":
+                        device.send_gif_paced(data)
+                        message += " Animation restored."
+                    else:
+                        self._upload_pixbuf(device, data)
+                        message += " Screen picture restored."
                 GLib.idle_add(self._finish, " ".join([message, *notes]), None)
             except DeviceMissing as exc:
                 GLib.idle_add(self._finish, None, str(exc))
@@ -1149,8 +1611,8 @@ class Window(Adw.ApplicationWindow):
 
         threading.Thread(target=thread_body, daemon=True, name="rt100-io").start()
 
-    def _screen_payload(self) -> GdkPixbuf.Pixbuf | None:
-        """The picture to put back on the screen, or None if there isn't one."""
+    def _screen_payload(self) -> tuple[str, object] | None:
+        """What to put back on the screen, as ("still"|"gif", data), or None."""
         if not getattr(self, "restore_row", None) or not self.restore_row.get_active():
             return None
         if getattr(self, "_last_sent", None) is not None:
@@ -1161,9 +1623,16 @@ class Window(Adw.ApplicationWindow):
             return None
         try:
             frames = load_frames(remembered["path"])
-            index = min(remembered.get("frame", 0), len(frames) - 1)
             bg = _rgba(remembered.get("bar", "#000000"))
-            return fit_pixbuf(frames[index], remembered.get("fit", "letterbox"), bg)
+            mode = remembered.get("fit", "letterbox")
+            if remembered.get("animated") and len(frames) > 1 and HAVE_PILLOW:
+                handle, temp = tempfile.mkstemp(prefix="rt100-anim-", suffix=".gif")
+                os.close(handle)
+                render_gif(frames, mode, bg, temp)
+                self._last_sent = ("gif", temp)
+                return self._last_sent
+            index = min(remembered.get("frame", 0), len(frames) - 1)
+            return ("still", fit_pixbuf(frames[index], mode, bg))
         except Exception:
             return None
 
@@ -1281,21 +1750,46 @@ class Window(Adw.ApplicationWindow):
 
         count = len(self.frames)
         self.frame_index = 0
-        self.frame_row.set_visible(count > 1)
+        animated = count > 1 and HAVE_PILLOW
+        self.animate_row.set_visible(count > 1)
+        self.animate_row.set_sensitive(HAVE_PILLOW)
+        if count > 1 and not HAVE_PILLOW:
+            self.animate_row.set_active(False)
+            self.animate_row.set_subtitle(
+                "Needs Pillow installed — sending a single frame instead."
+            )
         if count > 1:
             self.frame_row.set_range(1, count)
             self.frame_row.set_value(1)
-            self.frame_row.set_subtitle(
-                f"{count} frames — the screen shows one still, not the animation"
+            sent = min(count, GIF_MAX_FRAMES)
+            self.animate_row.set_subtitle(
+                f"Sends {sent} of {count} frames at {GIF_FRAMERATE} fps"
+                if count > GIF_MAX_FRAMES else
+                f"Sends all {count} frames at {GIF_FRAMERATE} fps"
             )
+        self._sync_frame_rows()
         name = Path(self.image_path).name
         self.file_row.set_subtitle(f"{name} ({count} frames)" if count > 1 else name)
         self.update_preview()
-        self.upload_button.set_sensitive(getattr(self, "device_ready", False))
+        self._sync_upload_button()
 
     def on_frame_changed(self, row: Adw.SpinRow, *_args) -> None:
         self.frame_index = max(0, int(row.get_value()) - 1)
         self.update_preview()
+
+    def on_animate_changed(self, *_args) -> None:
+        self._sync_frame_rows()
+        self.update_preview()
+
+    def _sync_frame_rows(self) -> None:
+        """Only offer a frame choice when a single frame is what gets sent."""
+        multi = len(self.frames) > 1
+        self.frame_row.set_visible(multi and not self.animate_row.get_active())
+
+    @property
+    def sending_animation(self) -> bool:
+        return (len(self.frames) > 1 and HAVE_PILLOW
+                and self.animate_row.get_active())
 
     def on_fit_changed(self, row: Adw.ComboRow, *_args) -> None:
         self.fit_mode = FIT_MODES[row.get_selected()][0]
@@ -1306,10 +1800,15 @@ class Window(Adw.ApplicationWindow):
     def update_preview(self) -> None:
         if not self.image_path or not getattr(self, "frames", None):
             return
-        index = min(self.frame_index, len(self.frames) - 1)
+        index = 0 if self.sending_animation else min(self.frame_index,
+                                                     len(self.frames) - 1)
+        # Preview at the real upload resolution: animations are 128x128, not the
+        # 162x173 a still gets, and that difference is visible on the screen.
+        size = GIF_DIMENSIONS if self.sending_animation else None
         try:
             pixbuf = fit_pixbuf(
-                self.frames[index], self.fit_mode, self.bar_colour.get_rgba()
+                self.frames[index], self.fit_mode, self.bar_colour.get_rgba(),
+                size=size,
             )
         except Exception as exc:
             self.show_error(f"Could not render that image.\n\n{type(exc).__name__}: {exc}")
@@ -1325,14 +1824,47 @@ class Window(Adw.ApplicationWindow):
         self.upload_progress.set_fraction(0.0)
         self.upload_progress.set_text("Preparing…")
 
+        if self.sending_animation:
+            frames = list(self.frames)
+            mode, bg = self.fit_mode, self.bar_colour.get_rgba()
+
+            def work(dev: RT100) -> str:
+                handle, temp = tempfile.mkstemp(prefix="rt100-anim-", suffix=".gif")
+                os.close(handle)
+                count = render_gif(frames, mode, bg, temp)
+                GLib.idle_add(self._pulse, f"Sending {count} frames…")
+                dev.send_gif_paced(temp)
+                # Kept, not deleted: a later backlight change re-sends it.
+                self._replace_last_sent(("gif", temp))
+                GLib.idle_add(self._remember_image)
+                return f"Animation uploaded — {count} frames."
+
+            self.run_on_device("Animation upload", work)
+            return
+
         def work(dev: RT100) -> str:
             self._upload_pixbuf(dev, pixbuf, report=True)
-            # Remember it so a later backlight change can put it back.
-            self._last_sent = pixbuf
+            self._replace_last_sent(("still", pixbuf))
             GLib.idle_add(self._remember_image)
             return "Image uploaded."
 
         self.run_on_device("Image upload", work)
+
+    def _replace_last_sent(self, payload: tuple[str, object]) -> None:
+        """Swap in the newest payload, cleaning up any temp GIF it replaces."""
+        previous = getattr(self, "_last_sent", None)
+        if previous and previous[0] == "gif" and previous[1] != payload[1]:
+            try:
+                os.unlink(previous[1])
+            except OSError:
+                pass
+        self._last_sent = payload
+
+    def _pulse(self, text: str) -> bool:
+        self.upload_progress.set_visible(True)
+        self.upload_progress.set_text(text)
+        self.upload_progress.pulse()
+        return False
 
     def _remember_image(self) -> bool:
         self.settings["last_image"] = {
@@ -1340,6 +1872,7 @@ class Window(Adw.ApplicationWindow):
             "fit": self.fit_mode,
             "frame": self.frame_index,
             "bar": _hex(self.bar_colour.get_rgba()),
+            "animated": self.sending_animation,
         }
         self.persist()
         return False
@@ -1414,7 +1947,77 @@ class Application(Adw.Application):
         window.present()
 
 
+def run_daemon(sensor: str | None, interface: int) -> int:
+    """Headless loop: clock once, then CPU and temperature forever.
+
+    This exists instead of upstream's `epomakercontroller start-daemon` for two
+    reasons. Its CLI opens the device with hid.device().open(vid, pid), which
+    takes interface 0 -- the one carrying key input, so it interferes with
+    typing. And it inherits the working-directory-relative config paths that
+    _stabilise_library_paths() works around here.
+    """
+    if IMPORT_ERROR:
+        print(f"Cannot start: {IMPORT_ERROR}", file=sys.stderr)
+        return 1
+
+    import signal as signal_module
+    import time as time_module
+
+    stopping = False
+
+    def handle_stop(*_args) -> None:
+        nonlocal stopping
+        stopping = True
+
+    signal_module.signal(signal_module.SIGTERM, handle_stop)
+    signal_module.signal(signal_module.SIGINT, handle_stop)
+
+    device: RT100 | None = None
+    try:
+        device = RT100(load_main_config(), interface=interface)
+        device.open_device()
+        device.send_time()
+        print(f"Screen updater running (interface {interface}, sensor {sensor}).",
+              flush=True)
+        while not stopping:
+            try:
+                import psutil
+                device.send_cpu(int(psutil.cpu_percent()))
+                if stopping:
+                    break
+                if sensor:
+                    temperature = read_sensor(sensor)
+                    if temperature is not None:
+                        device.send_temperature(int(temperature))
+            except Exception as exc:
+                print(f"Update failed: {exc}", file=sys.stderr, flush=True)
+                return 1
+            for _ in range(16):  # ~1.6s, responsive to SIGTERM
+                if stopping:
+                    break
+                time_module.sleep(0.1)
+    except DevicePermission as exc:
+        print(f"{UDEV_FIX}\n\n({exc})", file=sys.stderr)
+        return 1
+    except (DeviceMissing, ValueError) as exc:
+        print(f"Keyboard not available: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        if device is not None:
+            try:
+                device.close_device()
+            except Exception:
+                pass
+    print("Screen updater stopped.", flush=True)
+    return 0
+
+
 def main() -> int:
+    if "--daemon" in sys.argv:
+        args = [a for a in sys.argv[1:] if a != "--daemon"]
+        sensor = args[0] if args else None
+        settings = load_settings()
+        return run_daemon(sensor, int(settings.get("interface", 1)))
     return Application().run(sys.argv)
 
 
