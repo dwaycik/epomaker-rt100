@@ -116,6 +116,37 @@ try:
     for _module in (_epo_constants, _epo_configs):
         if hasattr(_module, "CONFIG_DIRECTORY"):
             _module.CONFIG_DIRECTORY = _config_home
+
+    def _best_gif_dimensions(source_width: int, source_height: int) -> tuple[int, int]:
+        """Accept any already-legal frame size instead of re-flooring it.
+
+        Upstream floors both axes to multiples of 64. That is stricter than the
+        firmware's actual requirement -- the frame buffer is 4K page-aligned, so
+        the rule is `w * h * 2 % 4096 == 0` -- and it caps a square source at
+        128x128, 58.5% of the 162x173 panel. It also floors the short axis of a
+        wide source to zero, which passes its own `% 4096` check because
+        0 % 4096 == 0, and uploads an empty frame.
+
+        Frames are pre-rendered to GIF_DIMENSIONS before they get here, so the
+        common path is a pass-through. Anything else falls back to upstream's
+        algorithm with the zero case clamped.
+        """
+        panel_w, panel_h = IMAGE_DIMENSIONS
+        if (source_width <= panel_w and source_height <= panel_h
+                and (source_width * source_height * 2) % 4096 == 0
+                and source_width > 0 and source_height > 0):
+            return source_width, source_height
+        import math as _math
+
+        ratio = min(panel_w / source_width, panel_h / source_height)
+        width = _math.ceil(source_width * ratio)
+        height = _math.ceil(source_height * ratio)
+        return (max(64, _math.floor(width / 64) * 64),
+                max(64, _math.floor(height / 64) * 64))
+
+    EpomakerGifCommand.EpomakerGifCommand.best_gif_dimensions = staticmethod(
+        _best_gif_dimensions
+    )
 except Exception as exc:  # pragma: no cover - environment problem, not logic
     IMPORT_ERROR = f"{type(exc).__name__}: {exc}"
 
@@ -602,7 +633,40 @@ def load_frames(path: str) -> list[GdkPixbuf.Pixbuf]:
 # nothing usable. Pre-rendering every frame to exactly 128x128 here avoids that
 # entirely -- best_gif_dimensions(128, 128) returns (128, 128) -- and applies
 # the user's chosen fitting instead of an unconditional squash.
-GIF_DIMENSIONS = (128, 128)
+def _gif_size() -> tuple[int, int]:
+    """Frame size for animated uploads.
+
+    The firmware places an animation frame at roughly 1:1 rather than scaling it
+    to the panel, so a small frame simply occupies less of the screen. The real
+    constraint is only that the frame be 4K-aligned -- `w * h * 2 % 4096 == 0`
+    -- because the animation framebuffer is page-aligned and unaligned sizes
+    produce vertical line artifacts.
+
+    Upstream satisfies that by flooring both axes to multiples of 64, which is
+    stricter than the rule requires and caps a square source at 128x128: only
+    58.5% of the 162x173 panel. 128x160 is the largest legal size that fits
+    (40960 bytes = 10 pages exactly) and covers 73.1%, and its portrait shape is
+    closer to the panel's than a square.
+
+    Override with EPOMAKER_GIF_SIZE=WxH to try another; the value is validated
+    against the alignment rule and the panel size before use.
+    """
+    default = (128, 160)
+    raw = os.environ.get("EPOMAKER_GIF_SIZE")
+    if not raw:
+        return default
+    try:
+        width, height = (int(part) for part in raw.lower().split("x"))
+    except ValueError:
+        return default
+    if (width * height * 2) % 4096 or not (0 < width <= 162 and 0 < height <= 173):
+        print(f"Ignoring EPOMAKER_GIF_SIZE={raw}: must fit 162x173 and satisfy "
+              "w*h*2 % 4096 == 0.", file=sys.stderr)
+        return default
+    return (width, height)
+
+
+GIF_DIMENSIONS = _gif_size()
 GIF_MAX_FRAMES = 56  # the library subsamples above this
 GIF_FRAMERATE = 15
 
