@@ -313,7 +313,7 @@ class DeviceBusy(Exception):
 # --------------------------------------------------------------------------- #
 
 
-class RT100(EpomakerController):
+class RT100(EpomakerController if not IMPORT_ERROR else object):  # type: ignore[misc]
     """EpomakerController with an explicit HID interface choice.
 
     v0.0.8 has no interface argument: ``_find_device_path`` matches
