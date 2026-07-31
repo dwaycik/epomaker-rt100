@@ -1,6 +1,0 @@
-[2026-07-31 07:38:33,996]     INFO: New GIF size if (128, 128)
-[2026-07-31 07:38:33,998]     INFO: Extracted 3 composited frames
-[2026-07-31 07:38:34,981]     INFO: Creating config directory at /mnt/shared/Documents/Claude Tinker Place/hardware/epomaker-rt100/.epomaker-controller
-[2026-07-31 07:38:34,981]     INFO: Creating default config file at /mnt/shared/Documents/Claude Tinker Place/hardware/epomaker-rt100/.epomaker-controller/config.json
-[2026-07-31 07:39:01,322]    ERROR: No NVIDIA driver available: Driver Not Loaded
-[2026-07-31 07:40:23,404]     INFO: Creating default config file at /mnt/shared/Documents/Claude Tinker Place/hardware/epomaker-rt100/.epomaker-controller/config.json
