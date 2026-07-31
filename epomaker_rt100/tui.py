@@ -14,14 +14,30 @@ import os
 import tempfile
 from pathlib import Path
 
-from textual import on, work
-from textual.app import App, ComposeResult
-from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.screen import ModalScreen
-from textual.widgets import (
-    Button, Footer, Header, Input, Label, ListItem, ListView, Log, Select,
-    Static, Switch, TabbedContent, TabPane,
-)
+try:
+    from textual import on, work
+    from textual.app import App, ComposeResult
+    from textual.containers import Horizontal, Vertical, VerticalScroll
+    from textual.screen import ModalScreen
+    from textual.widgets import (
+        Button, Footer, Header, Input, Label, Log, Select,
+        Static, Switch, TabbedContent, TabPane,
+    )
+except ImportError:  # pragma: no cover - a missing optional front end
+    # Textual is an optional dependency so a headless or GTK-only install does
+    # not pull it in. Say so plainly instead of raising ModuleNotFoundError at
+    # the user, which reads like the package is broken.
+    import sys as _sys
+
+    print(
+        "The terminal interface needs Textual, which is not installed.\n\n"
+        "  Arch / CachyOS:  sudo pacman -S python-textual\n"
+        "  Debian/Ubuntu:   sudo apt install python3-textual\n"
+        "  pip:             pip install textual\n\n"
+        "Or use the desktop app instead:  epomaker-rt100-gtk",
+        file=_sys.stderr,
+    )
+    _sys.exit(1)
 
 from . import core
 
