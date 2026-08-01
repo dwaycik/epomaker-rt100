@@ -56,6 +56,14 @@ fixes arrive by bumping one file.
 The screen can show the time, CPU load and a temperature sensor, kept current by
 a small background service:
 
+**Installed from the AUR**, the unit is already in place — just switch it on:
+
+```bash
+systemctl --user enable --now epomaker-controller.service
+```
+
+**From source**, install the unit first:
+
 ```bash
 ./install-service.sh                 # defaults to the coretemp-0 CPU package sensor
 ./install-service.sh --list-sensors  # see what this machine offers
@@ -63,7 +71,7 @@ a small background service:
 ./install-service.sh --uninstall
 ```
 
-Then use the **System info** tab to start it, stop it, enable it at login, choose
+Either way, use the **System info** tab to start it, stop it, enable it at login, choose
 the sensor, and sync the clock. The keyboard has no battery-backed clock, so it
 shows whatever the host last sent and resets when unplugged.
 
@@ -72,12 +80,14 @@ authorisation, so the GUI can pause it around other operations without a polkit
 prompt and without ever touching sudo. Because it holds the HID interface, the
 app stops it around every keyboard operation and restarts it afterwards.
 
-The unit runs `epomaker_rt100_gtk.py --daemon`, not upstream's
+The unit runs `epomaker-rt100-daemon`, not upstream's
 `epomakercontroller start-daemon`. Upstream's CLI opens the device with
 `hid.device().open(vendor_id, product_id)`, which takes **interface 0** — the one
 carrying key input — so it interferes with typing.
 
 ## Launcher entry
+
+Installed from the AUR, the desktop entry is already there. From source:
 
 ```bash
 ./install-desktop.sh          # writes ~/.local/share/applications, no root
@@ -93,48 +103,61 @@ rofi, fuzzel, GNOME, Plasma).
 
 - Linux, Wayland or X11.
 - Python 3.10+, PyGObject, GTK 4.10+ and libadwaita 1.4+.
-- An RT100 connected **over USB with its cable**. Bluetooth and the 2.4 GHz
-  dongle are not supported — that is a limitation of the underlying library,
-  not of this app. If only the dongle is plugged in, the app says so.
+- An RT100 connected **over USB with its cable**. The 2.4 GHz dongle does not
+  work: 0.0.9 added a wireless path, but its handshake never completes on this
+  hardware — the device answers `00015d0000010101…` where the library looks for
+  `01010168`, so `send_wireless_init()` returns False and the device is never
+  opened. Tested, not assumed. Bluetooth is not implemented at all.
 
 ## Install
 
-### Arch / CachyOS
-
-0.0.9 relaxed the old `hidapi==0.14.0` pin, which could not build on Python
-3.13+ (`error: unknown file type '.pxd'` under modern setuptools). Another reason
-to take git over PyPI.
+### Arch / CachyOS — from the AUR
 
 ```bash
-sudo pacman -S --needed python-gobject gtk4 libadwaita python-pillow
+paru -S epomaker-rt100-gtk-git    # desktop app  ->  epomaker-rt100-gtk
+paru -S epomaker-rt100-git        # terminal app ->  epomaker-rt100
+```
+
+The GTK package depends on the base one, so installing it gets you both
+commands. Install only the base package on a headless machine and no desktop
+libraries are pulled in.
+
+Both are `-git` packages: they build from the latest commit, so updates arrive
+through a normal `paru -Syu`.
+
+Every dependency comes from the official repositories. The upstream library is
+built from the pinned commit in `.upstream-commit` and bundled, because its own
+package must depend on `python-opencv` — which pulls VTK, OpenMPI, hdf5 and
+qt6-base, about 436 MiB — for five image calls that Pillow and numpy cover
+here. Installing this therefore **conflicts** with `python-epomakercontroller-git`;
+install that separately only if you want upstream's `epomakercontroller` CLI.
+
+After installing, apply the udev rule (see [Permissions](#permissions-required))
+and replug the keyboard.
+
+### Any distribution — from source
+
+```bash
+sudo pacman -S --needed python-gobject gtk4 libadwaita python-pillow  # Arch
+# Debian/Ubuntu: sudo apt install python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 \
+#                                 python3-pil libhidapi-libusb0
 
 git clone https://github.com/dwaycik/epomaker-rt100
-cd epomaker-rt100-gtk
+cd epomaker-rt100
 python -m venv --system-site-packages .venv
-.venv/bin/pip install 'hidapi>=0.15.0' appdirs click gpustat 'numpy<2.0' \
-    opencv-python-headless psutil python-dateutil pillow
-.venv/bin/pip install --no-deps "git+https://github.com/strodgers/epomaker-controller@$(cat .upstream-commit)"
+.venv/bin/pip install -e ".[tui]"
+.venv/bin/pip install --no-deps \
+    "git+https://github.com/strodgers/epomaker-controller@$(cat .upstream-commit)"
+./install-desktop.sh && ./install-service.sh
 ```
-
-**Install the library from git, not PyPI.** PyPI's newest is 0.0.8; animated GIF
-support arrived in 0.0.9, which has not been released. `.upstream-commit` pins
-the exact commit this was built and tested against, so every machine gets an
-identical build. `--no-deps` is used because 0.0.9's metadata omits Pillow (which
-its own GIF code imports) and would otherwise re-resolve pins unnecessarily.
 
 `--system-site-packages` is what lets the venv see PyGObject, which is painful
-to build from PyPI and ships working on every target distro.
+to build from PyPI and ships working on every target distro. `.upstream-commit`
+pins the library commit this was tested against — 0.0.9 has the native GIF
+support and drops the old `hidapi==0.14.0` pin, but has never been released to
+PyPI, so it must come from git.
 
-### Debian / Ubuntu
-
-```bash
-sudo apt install -y python3-gi python3-gi-cairo gir1.2-gtk-4.0 \
-    gir1.2-adw-1 libhidapi-libusb0 libusb-1.0-0-dev
-python3 -m venv --system-site-packages .venv
-.venv/bin/pip install 'hidapi>=0.15.0' appdirs click gpustat 'numpy<2.0' \
-    opencv-python-headless psutil python-dateutil pillow
-.venv/bin/pip install --no-deps "git+https://github.com/strodgers/epomaker-controller@$(cat .upstream-commit)"
-```
+That gives you `.venv/bin/epomaker-rt100` and `.venv/bin/epomaker-rt100-gtk`.
 
 ### Permissions (required)
 
@@ -142,6 +165,16 @@ python3 -m venv --system-site-packages .venv
 `/dev/bus/usb/...`. That node is root-only by default, and the ACLs
 systemd-logind puts on `/dev/hidraw*` do **not** help because the libusb
 backend never opens those.
+
+**Installed from the AUR**, the rule is already at
+`/usr/lib/udev/rules.d/70-epomaker-rt100.rules` — it just has to be picked up:
+
+```bash
+sudo udevadm control --reload-rules && sudo udevadm trigger
+# then UNPLUG AND REPLUG the keyboard
+```
+
+**From source**, install it first:
 
 ```bash
 sudo install -m644 udev/70-epomaker-rt100.rules /etc/udev/rules.d/
