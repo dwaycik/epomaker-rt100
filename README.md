@@ -199,8 +199,11 @@ these commands rather than trying to run them.
 ## Run
 
 ```bash
-.venv/bin/python epomaker_rt100_gtk.py
+epomaker-rt100        # terminal
+epomaker-rt100-gtk    # desktop
 ```
+
+From a source install those live in `.venv/bin/` rather than on `PATH`.
 
 ## Things worth knowing
 
