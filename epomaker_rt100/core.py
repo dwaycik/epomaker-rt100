@@ -230,16 +230,24 @@ try:
     import epomakercontroller.configs.configs as _epo_configs
     import epomakercontroller.configs.constants as _epo_constants
 
+    # Both of these were fixed upstream in #93 (merged). The patches below now
+    # apply only when the installed library still has the old relative paths,
+    # so pinning an older commit keeps working without forcing our choice on a
+    # version that already gets it right.
+    #
+    # configs.py binds these names with `from .constants import ...`, so both
+    # modules need patching.
     _installed_default = Path(_epo_configs.__file__).parent / "default.json"
-    if _installed_default.exists():
-        # configs.py binds the name with `from .constants import ...`, so both
-        # modules need patching.
+    if not os.path.isabs(getattr(_epo_constants, "PATH_TO_DEFAULT_CONFIG", "")):
+        if _installed_default.exists():
+            for _module in (_epo_constants, _epo_configs):
+                if hasattr(_module, "PATH_TO_DEFAULT_CONFIG"):
+                    _module.PATH_TO_DEFAULT_CONFIG = str(_installed_default)
+
+    if not os.path.isabs(getattr(_epo_constants, "CONFIG_DIRECTORY", "")):
         for _module in (_epo_constants, _epo_configs):
-            if hasattr(_module, "PATH_TO_DEFAULT_CONFIG"):
-                _module.PATH_TO_DEFAULT_CONFIG = str(_installed_default)
-    for _module in (_epo_constants, _epo_configs):
-        if hasattr(_module, "CONFIG_DIRECTORY"):
-            _module.CONFIG_DIRECTORY = str(Path.home() / ".epomaker-controller")
+            if hasattr(_module, "CONFIG_DIRECTORY"):
+                _module.CONFIG_DIRECTORY = str(Path.home() / ".epomaker-controller")
 except Exception as exc:  # pragma: no cover - environment problem, not logic
     IMPORT_ERROR = f"{type(exc).__name__}: {exc}"
 
