@@ -1,0 +1,12 @@
+[Unit]
+Description=Epomaker RT100 key colours that follow the desktop accent colour
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=@PYTHON@ @SCRIPT@ --watch-theme
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

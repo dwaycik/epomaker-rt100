@@ -417,17 +417,14 @@ ANSI_LAYOUT: dict[str, tuple[float, float, float, float]] = {
     "NUMPAD_1": (15.5, 4.5, 1, 1), "NUMPAD_2": (16.5, 4.5, 1, 1),
     "NUMPAD_3": (17.5, 4.5, 1, 1), "NUMPAD_ENTER": (18.5, 4.5, 1, 2),
 
-    # The leftmost/rightmost Ctrl names follow the library's own ISO layout
-    # file, which lists RIGHT_CTRL first and LEFT_CTRL last. That looks like an
-    # upstream mix-up, but LED indices are not geometric (index 11 is the DIAL,
-    # top-right) so it cannot be derived. Both caps read "Ctrl"; if the wrong
-    # one lights, swap these two names.
-    "RIGHT_CTRL": (0, 5.5, 1.25, 1),
+    # LEFT_CTRL is the leftmost Ctrl: LED 5 confirmed on hardware 2026-11-11.
+    # (An earlier version swapped these to match the library's ISO layout file.)
+    "LEFT_CTRL": (0, 5.5, 1.25, 1),
     "LEFT_WIN": (1.25, 5.5, 1.25, 1),
     "LEFT_ALT": (2.5, 5.5, 1.25, 1),
     "SPACE": (3.75, 5.5, 5.25, 1),
     "RIGHT_ALT": (9, 5.5, 1, 1), "FN": (10, 5.5, 1, 1),
-    "LEFT_CTRL": (11, 5.5, 1, 1),
+    "RIGHT_CTRL": (11, 5.5, 1, 1),
     "LEFT": (12, 5.5, 1, 1), "DOWN": (13, 5.5, 1, 1), "RIGHT": (14, 5.5, 1, 1),
     "NUMPAD_0": (15.5, 5.5, 2, 1), "NUMPAD_DOT": (17.5, 5.5, 1, 1),
 }
@@ -580,7 +577,10 @@ class RT100(EpomakerController if not IMPORT_ERROR else object):  # type: ignore
     # -- convenience wrappers so front ends never build commands themselves --
 
     def apply_solid(self, rgb: tuple[int, int, int]) -> None:
-        self.set_rgb_all_keys(*rgb)
+        # Not set_rgb_all_keys(): it sends unpaced, and the firmware drops the
+        # high-index (right-hand) keys. Paced like every other key frame.
+        keys = KeyboardKeys(self.keymap_config)
+        self.apply_key_colours({key.value: rgb for key in keys})
 
     def apply_key_colours(self, index_to_rgb: dict[int, tuple[int, int, int]]) -> None:
         keys = KeyboardKeys(self.keymap_config)
@@ -1039,3 +1039,306 @@ def run_daemon(sensor: str | None, interface: int = DEFAULT_INTERFACE) -> int:
                 pass
     print("Screen updater stopped.", flush=True)
     return 0
+
+
+# --------------------------------------------------------------------------- #
+# Follow desktop colours
+#
+# Paints one group of keys in an accent colour and every other key in a second
+# colour. The accent comes from the desktop (the XDG portal's accent-color, as
+# set by GNOME and KDE) or from a user command for desktops without one. It
+# runs on ``epomaker-rt100-daemon --sync-theme`` (Sync now, or a user's own
+# hook) and from ``--watch-theme``, a user service that follows portal changes.
+# The front ends only edit the settings; all device work lives here.
+# --------------------------------------------------------------------------- #
+
+THEME_SYNC_DEFAULT_KEYS = [
+    "LEFT_SHIFT", "RIGHT_SHIFT", "LEFT_CTRL", "RIGHT_CTRL",
+    "LEFT_ALT", "RIGHT_ALT", "LEFT_WIN", "FN",
+]
+
+# A key frame is a flash write, and back-to-back writes have killed this
+# family's endpoint until replug (sharkfin docs/PROTOCOL.md: two uploads per 10 s
+# survives, two per 5 s stalls). A colour picker dragged in another app can
+# rewrite its config many times a second, so requests are coalesced and spaced.
+THEME_SYNC_SETTLE_S = 1.0
+THEME_SYNC_MIN_GAP_S = 5.0
+
+
+def _runtime_dir() -> Path:
+    return Path(os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir())
+
+
+def _hex_rgb(value) -> tuple[int, int, int] | None:
+    text = str(value or "").strip().lstrip("#")
+    if len(text) != 6:
+        return None
+    try:
+        return tuple(bytes.fromhex(text))  # type: ignore[return-value]
+    except ValueError:
+        return None
+
+
+def vivid(rgb: tuple[int, int, int]) -> tuple[int, int, int]:
+    """Same hue at full saturation and brightness.
+
+    Desktop accents are often pastels, and the RT100's LEDs wash those out to
+    near-white. A colour with no real hue (max-min below 20) becomes white.
+    """
+    high, low = max(rgb), min(rgb)
+    if high - low < 20:
+        return (255, 255, 255)
+    return tuple(round((c - low) * 255 / (high - low)) for c in rgb)  # type: ignore[return-value]
+
+
+LED_GAMMA = 2.2
+
+
+def led_gamma(rgb: tuple[int, int, int]) -> tuple[int, int, int]:
+    """Screen colour -> LED drive level.
+
+    Screen values are gamma-encoded but the LEDs are driven linearly, so mid
+    channels show far too bright: a screen orange (FF9C00) reads as yellow on
+    the keys. 2.2 (the usual sRGB approximation) confirmed by eye on an RT100.
+    """
+    return tuple(round((c / 255) ** LED_GAMMA * 255) for c in rgb)  # type: ignore[return-value]
+
+
+THEME_SYNC_DEFAULT_OTHER = "#ffffff"
+_PORTAL = ("--dest", "org.freedesktop.portal.Desktop",
+           "--object-path", "/org/freedesktop/portal/desktop")
+
+
+def parse_portal_accent(output: str) -> tuple[int, int, int] | None:
+    """The (r, g, b) doubles in gdbus output, as 0-255; None when unset.
+
+    The portal spec says out-of-range values mean "no accent colour set".
+    """
+    import re
+
+    match = re.search(r"\(\s*([-\d.e]+),\s*([-\d.e]+),\s*([-\d.e]+)\s*\)", output)
+    if not match:
+        return None
+    channels = [float(v) for v in match.groups()]
+    if not all(0.0 <= c <= 1.0 for c in channels):
+        return None
+    return tuple(round(c * 255) for c in channels)  # type: ignore[return-value]
+
+
+def portal_accent() -> tuple[int, int, int] | None:
+    """The desktop accent from org.freedesktop.appearance, via gdbus (GLib)."""
+    try:
+        result = subprocess.run(
+            ["gdbus", "call", "--session", *_PORTAL,
+             "--method", "org.freedesktop.portal.Settings.ReadOne",
+             "org.freedesktop.appearance", "accent-color"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return parse_portal_accent(result.stdout) if result.returncode == 0 else None
+
+
+def parse_command_colours(output: str) -> list[tuple[int, int, int]]:
+    """Every #RRGGBB / RRGGBB word in a colour command's output, in order."""
+    found = []
+    for word in output.split():
+        rgb = _hex_rgb(word)
+        if rgb is not None:
+            found.append(rgb)
+    return found
+
+
+def command_colours(command: str) -> list[tuple[int, int, int]]:
+    """Run the user's colour command; it prints the accent, then optionally
+    the colour for the other keys. The command comes from the user's own
+    settings file, so it runs with their shell, like a desktop hook would."""
+    try:
+        result = subprocess.run(
+            ["sh", "-c", command], capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return parse_command_colours(result.stdout) if result.returncode == 0 else []
+
+
+THEME_SYNC_DEFAULT_CHOSEN = "#ff8000"
+
+
+def _desktop_list(settings: dict) -> list[tuple[int, int, int]] | str:
+    """The desktop's colours, accent first, or a message saying what is missing."""
+    if settings.get("theme_sync_source") == "command":
+        command = (settings.get("theme_sync_command") or "").strip()
+        if not command:
+            return "No colour command is set."
+        colours = command_colours(command)
+        return colours or "The colour command printed no colour."
+    accent = portal_accent()
+    if accent is None:
+        return ("This desktop does not share an accent colour. "
+                "Use a colour command instead.")
+    return [accent]
+
+
+def desktop_colours(settings: dict) -> tuple[tuple[int, int, int], tuple[int, int, int]] | str:
+    """LED-ready (accent keys, other keys) colours, or a message saying what is missing.
+
+    Each group either follows the desktop or uses the user's own colour. The
+    accent keys take the desktop accent; the other keys take the command's
+    second colour if it printed one, else the accent too (portals share only
+    one colour). The accent is pushed to full saturation, since desktop accents
+    are often pastels the LEDs wash out; everything is gamma-corrected.
+    """
+    chosen_desktop = settings.get("theme_sync_chosen_mode", "desktop") == "desktop"
+    other_desktop = settings.get("theme_sync_other_mode", "custom") == "desktop"
+    found: list[tuple[int, int, int]] = []
+    if chosen_desktop or other_desktop:
+        listed = _desktop_list(settings)
+        if isinstance(listed, str):
+            return listed
+        found = listed
+    accent = vivid(found[0]) if found else (255, 255, 255)
+    second = found[1] if len(found) > 1 else accent
+
+    def own(key: str, default: str) -> tuple[int, int, int]:
+        return _hex_rgb(settings.get(key, default)) or _hex_rgb(default)  # type: ignore[return-value]
+
+    chosen = accent if chosen_desktop else own("theme_sync_chosen", THEME_SYNC_DEFAULT_CHOSEN)
+    other = second if other_desktop else own("theme_sync_other", THEME_SYNC_DEFAULT_OTHER)
+    return led_gamma(chosen), led_gamma(other)
+
+
+def theme_key_colours(
+    keys, accent_names: Iterable[str], accent, text, backslash_name: str = "HASH"
+) -> dict[int, tuple[int, int, int]]:
+    """LED index -> colour: accent on the named keys, text on everything else.
+
+    BACKSLASH resolves through the calibrated name, as in the front ends.
+    """
+    wanted = {backslash_name if n == "BACKSLASH" else n for n in accent_names}
+    return {key.value: (accent if key.name in wanted else text) for key in keys}
+
+
+def _restore_screen(device: "RT100", settings: dict) -> str:
+    """Put the remembered picture back; a key-RGB write blanks the screen."""
+    remembered = settings.get("last_image")
+    if not settings.get("restore_screen", True) or not remembered:
+        return ""
+    try:
+        frames = load_frames(remembered["path"])
+        bar = _hex_rgb(remembered.get("bar")) or (0, 0, 0)
+        mode = remembered.get("fit", "letterbox")
+        if remembered.get("animated") and len(frames) > 1:
+            handle, temp = tempfile.mkstemp(prefix="rt100-anim-", suffix=".gif")
+            os.close(handle)
+            try:
+                render_gif(frames, mode, bar, temp)
+                device.send_gif_paced(temp)
+            finally:
+                os.unlink(temp)
+        else:
+            index = min(remembered.get("frame", 0), len(frames) - 1)
+            device.upload_still(fit_image(frames[index], mode, bar))
+        return " Screen picture restored."
+    except Exception as exc:  # the colours already landed; say so, don't fail
+        return f" Screen picture not restored: {exc}"
+
+
+def sync_theme(force: bool = False) -> tuple[int, str]:
+    """Paint the keyboard from the desktop colours. Returns (exit code, message).
+
+    Does nothing unless "Follow desktop colours" is on, or ``force`` is set.
+    """
+    import fcntl
+
+    settings = load_settings()
+    if not (force or settings.get("theme_sync")):
+        return 0, "Follow desktop colours is off."
+    if IMPORT_ERROR:
+        return 1, f"Cannot sync: {IMPORT_ERROR}"
+
+    # Coalesce: every caller stamps a token, waits, and only the newest goes on.
+    token = f"{os.getpid()}-{time.monotonic_ns()}"
+    pending = _runtime_dir() / "epomaker-rt100-sync.pending"
+    pending.write_text(token)
+    time.sleep(THEME_SYNC_SETTLE_S)
+    if pending.read_text() != token:
+        return 0, "Superseded by a newer request."
+
+    with open(_runtime_dir() / "epomaker-rt100-sync.lock", "a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        lock.seek(0)
+        try:
+            last = float(lock.read() or 0)
+        except ValueError:
+            last = 0.0
+        time.sleep(max(0.0, last + THEME_SYNC_MIN_GAP_S - time.time()))
+
+        colours = desktop_colours(settings)
+        if isinstance(colours, str):
+            return 1, colours
+        accent, text = colours
+        names = settings.get("theme_sync_keys", THEME_SYNC_DEFAULT_KEYS)
+
+        device: RT100 | None = None
+        guard = DaemonGuard()
+        try:
+            guard.stop()
+            # Always interface 2: see DEFAULT_INTERFACE for why the others are unsafe.
+            device = RT100(load_main_config(), interface=DEFAULT_INTERFACE)
+            device.open_device()
+            device.apply_key_colours(theme_key_colours(
+                KeyboardKeys(device.keymap_config), names, accent, text,
+                settings.get("backslash_index_name", "HASH"),
+            ))
+            lock.seek(0)
+            lock.truncate()
+            lock.write(str(time.time()))
+            lock.flush()
+            message = (
+                f"Synced: {len(names)} keys #{bytes(accent).hex()}, "
+                f"rest #{bytes(text).hex()}." + _restore_screen(device, settings)
+            )
+            return 0, message
+        except DevicePermission as exc:
+            return 1, f"{UDEV_FIX}\n\n({exc})"
+        except (DeviceMissing, DeviceBusy, ValueError) as exc:
+            return 1, f"Keyboard not available: {exc}"
+        finally:
+            if device is not None:
+                try:
+                    device.close_device()
+                except Exception:
+                    pass
+            guard.restart()
+
+
+THEME_SYNC_SERVICE = os.environ.get(
+    "EPOMAKER_THEME_SERVICE_NAME", "epomaker-theme-sync.service"
+)
+
+
+def watch_theme() -> int:
+    """Sync once, then again whenever the portal's accent colour changes.
+
+    Runs as its own user unit rather than inside the screen updater, because
+    every sync stops that service (it holds the device) and would kill itself.
+    A colour command has no change signal, so its users call --sync-theme from
+    their own desktop hook instead; this loop still covers the portal.
+    """
+    code, message = sync_theme()
+    print(message, flush=True)
+    try:
+        monitor = subprocess.Popen(
+            ["gdbus", "monitor", "--session", *_PORTAL],
+            stdout=subprocess.PIPE, text=True,
+        )
+    except OSError as exc:
+        print(f"Cannot watch the desktop colour: {exc}", file=sys.stderr)
+        return 1
+    assert monitor.stdout is not None
+    for line in monitor.stdout:
+        if "SettingChanged" in line and "accent-color" in line:
+            code, message = sync_theme()
+            print(message, file=sys.stderr if code else sys.stdout, flush=True)
+    return monitor.wait()

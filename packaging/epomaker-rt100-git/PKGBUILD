@@ -87,6 +87,11 @@ package_epomaker-rt100-git() {
     systemd/epomaker-controller.service.in > epomaker-controller.service
   install -Dm644 epomaker-controller.service \
     "${pkgdir}/usr/lib/systemd/user/epomaker-controller.service"
+  # Follows the desktop accent colour; the GTK switch enables it.
+  sed -e 's|@PYTHON@ @SCRIPT@|/usr/bin/epomaker-rt100-daemon|' \
+    systemd/epomaker-theme-sync.service.in > epomaker-theme-sync.service
+  install -Dm644 epomaker-theme-sync.service \
+    "${pkgdir}/usr/lib/systemd/user/epomaker-theme-sync.service"
 
   install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
   install -Dm644 README.md "${pkgdir}/usr/share/doc/${pkgname}/README.md"

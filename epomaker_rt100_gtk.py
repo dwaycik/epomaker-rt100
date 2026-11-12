@@ -275,17 +275,13 @@ ANSI_LAYOUT: dict[str, tuple[float, float, float, float]] = {
     "NUMPAD_1": (15.5, 4.5, 1, 1), "NUMPAD_2": (16.5, 4.5, 1, 1),
     "NUMPAD_3": (17.5, 4.5, 1, 1), "NUMPAD_ENTER": (18.5, 4.5, 1, 2),
     # Bottom row.
-    # The leftmost/rightmost Ctrl names follow the library's own ISO layout
-    # file, which lists RIGHT_CTRL first and LEFT_CTRL last. That looks like an
-    # upstream mix-up, but it is the only record of the mapping and the LED
-    # indices are not geometric (index 11 is the DIAL, which sits top-right),
-    # so it cannot be derived. Both caps read "Ctrl"; if the wrong one lights,
-    # swap these two names.
-    "RIGHT_CTRL": (0, 5.5, 1.25, 1),
+    # LEFT_CTRL is the leftmost Ctrl: LED 5 confirmed on hardware 2026-11-11.
+    # (An earlier version swapped these to match the library's ISO layout file.)
+    "LEFT_CTRL": (0, 5.5, 1.25, 1),
     "LEFT_WIN": (1.25, 5.5, 1.25, 1),
     "LEFT_ALT": (2.5, 5.5, 1.25, 1),
     "SPACE": (3.75, 5.5, 5.25, 1),
-    "RIGHT_ALT": (9, 5.5, 1, 1), "FN": (10, 5.5, 1, 1), "LEFT_CTRL": (11, 5.5, 1, 1),
+    "RIGHT_ALT": (9, 5.5, 1, 1), "FN": (10, 5.5, 1, 1), "RIGHT_CTRL": (11, 5.5, 1, 1),
     "LEFT": (12, 5.5, 1, 1), "DOWN": (13, 5.5, 1, 1), "RIGHT": (14, 5.5, 1, 1),
     "NUMPAD_0": (15.5, 5.5, 2, 1), "NUMPAD_DOT": (17.5, 5.5, 1, 1),
 }
@@ -293,6 +289,21 @@ ANSI_LAYOUT: dict[str, tuple[float, float, float, float]] = {
 LAYOUT_UNITS_W = 19.5
 LAYOUT_UNITS_H = 6.5
 UNIT_PX = 34
+
+
+def _widen_page(page: "Adw.PreferencesPage", width: int) -> None:
+    """Let a page's content grow past Adw.PreferencesPage's fixed 600 px clamp.
+
+    The key layout is wider than 600 px, so the Dial column ended up hidden
+    behind a sideways scroll. The page has no property for this; its tree is
+    ScrolledWindow > Viewport > Clamp (libadwaita 1.10). If that changes, the
+    page simply keeps the default width.
+    """
+    scrolled = page.get_first_child()
+    viewport = scrolled.get_first_child() if scrolled else None
+    clamp = viewport.get_first_child() if viewport else None
+    if isinstance(clamp, Adw.Clamp):
+        clamp.set_maximum_size(max(width, clamp.get_maximum_size()))
 
 # Nicer captions than the library's display_str for a few keys. Plain words
 # rather than symbols like U+232B/U+21B5, which live in fallback fonts and are
@@ -490,6 +501,12 @@ def scan_bus() -> dict[str, object]:
 # is-active, stop, run, start again in a finally block. User units are tried
 # first because stopping those needs no authorisation at all.
 # --------------------------------------------------------------------------- #
+
+
+# Matches core.THEME_SYNC_SERVICE; the GTK front end does not import core.
+THEME_SYNC_SERVICE = os.environ.get(
+    "EPOMAKER_THEME_SERVICE_NAME", "epomaker-theme-sync.service"
+)
 
 
 class UserUnit:
@@ -1170,8 +1187,165 @@ class Window(Adw.ApplicationWindow):
         group.add(self.backslash_row)
         page.add(group)
 
+        page.add(self._theme_sync_group())
+
         self.build_keycaps()
+        _widen_page(page, int(LAYOUT_UNITS_W * UNIT_PX) + 60)
         return page
+
+    # Matches core.THEME_SYNC_DEFAULT_KEYS; the GTK front end does not import core.
+    THEME_SYNC_DEFAULT_KEYS = [
+        "LEFT_SHIFT", "RIGHT_SHIFT", "LEFT_CTRL", "RIGHT_CTRL",
+        "LEFT_ALT", "RIGHT_ALT", "LEFT_WIN", "FN",
+    ]
+
+    def _theme_sync_group(self) -> Adw.PreferencesGroup:
+        group = Adw.PreferencesGroup(
+            title="Follow desktop colours",
+            description=(
+                "Colour the accent keys and all other keys separately. Each can "
+                "follow your desktop's colour or use one you pick."
+            ),
+        )
+        self.theme_sync_row = Adw.SwitchRow(
+            title="Follow desktop colours",
+            active=bool(self.settings.get("theme_sync", False)),
+        )
+        self.theme_sync_row.connect("notify::active", self.on_theme_sync_toggled)
+        group.add(self.theme_sync_row)
+
+        self.theme_source_row = Adw.ComboRow(
+            title="Accent colour from",
+            model=Gtk.StringList.new(["Desktop accent colour", "A command"]),
+            selected=1 if self.settings.get("theme_sync_source") == "command" else 0,
+        )
+        self.theme_source_row.set_subtitle(
+            "GNOME and KDE share an accent colour. Other desktops need a command."
+        )
+        self.theme_source_row.connect("notify::selected", self.on_theme_source_changed)
+        group.add(self.theme_source_row)
+
+        self.theme_command_row = Adw.EntryRow(
+            title="Colour command (prints the accent, optionally a second colour)",
+            text=self.settings.get("theme_sync_command", ""),
+            show_apply_button=True,
+        )
+        self.theme_command_row.connect("apply", self.on_theme_command_applied)
+        group.add(self.theme_command_row)
+
+        self.theme_chosen_mode, self.theme_chosen = self._theme_colour_row(
+            group, "Accent keys", "theme_sync_chosen", "#ff8000", "desktop")
+        self.theme_other_mode, self.theme_other = self._theme_colour_row(
+            group, "All other keys", "theme_sync_other", "#ffffff", "custom")
+        self._refresh_theme_source()
+
+        self.theme_keys_row = Adw.ActionRow(title="Keys in the accent colour")
+        use = Gtk.Button(label="Use selected keys", valign=Gtk.Align.CENTER)
+        use.set_tooltip_text("Select keys on the layout above first.")
+        use.connect("clicked", self.on_theme_keys_from_selection)
+        self.theme_keys_row.add_suffix(use)
+        sync = Gtk.Button(label="Sync now", valign=Gtk.Align.CENTER)
+        sync.connect("clicked", lambda *_: self.run_theme_sync())
+        self.theme_keys_row.add_suffix(sync)
+        group.add(self.theme_keys_row)
+        self._refresh_theme_keys_row()
+        return group
+
+    def _theme_keys(self) -> list[str]:
+        return list(self.settings.get("theme_sync_keys", self.THEME_SYNC_DEFAULT_KEYS))
+
+    def _refresh_theme_keys_row(self) -> None:
+        keys = self._theme_keys()
+        self.theme_keys_row.set_subtitle(
+            f"{len(keys)} keys: " + ", ".join(k.replace("_", " ").title() for k in keys)
+        )
+
+    def on_theme_sync_toggled(self, row: Adw.SwitchRow, *_args) -> None:
+        on = row.get_active()
+        self.settings["theme_sync"] = on
+        save_settings(self.settings)
+        # The watcher service follows desktop accent changes while this is on.
+        unit = UserUnit(THEME_SYNC_SERVICE)
+        if unit.exists():
+            error = unit.set_enabled(on) or (unit.start() if on else unit.stop())
+            if error:
+                self.toast(f"Could not {'start' if on else 'stop'} the watcher: {error}")
+        if on:
+            self.run_theme_sync()
+
+    def _refresh_theme_source(self) -> None:
+        self.theme_command_row.set_visible(self.theme_source_row.get_selected() == 1)
+
+    def on_theme_source_changed(self, row: Adw.ComboRow, *_args) -> None:
+        self.settings["theme_sync_source"] = "command" if row.get_selected() == 1 else "desktop"
+        save_settings(self.settings)
+        self._refresh_theme_source()
+
+    def on_theme_command_applied(self, row: Adw.EntryRow) -> None:
+        self.settings["theme_sync_command"] = row.get_text().strip()
+        save_settings(self.settings)
+        self.run_theme_sync()
+
+    def _theme_colour_row(self, group, title: str, key: str, default: str,
+                          default_mode: str):
+        """A "Desktop colour / My colour" drop-down with the own-colour button."""
+        row = Adw.ComboRow(
+            title=title,
+            model=Gtk.StringList.new(["Desktop colour", "My colour"]),
+            selected=0 if self.settings.get(f"{key}_mode", default_mode) == "desktop" else 1,
+        )
+        button = Gtk.ColorDialogButton(dialog=Gtk.ColorDialog(), valign=Gtk.Align.CENTER)
+        button.set_rgba(_rgba(self.settings.get(key, default)))
+        button.set_sensitive(row.get_selected() == 1)
+        row.add_suffix(button)
+
+        def on_mode(combo, *_args) -> None:
+            own = combo.get_selected() == 1
+            button.set_sensitive(own)
+            self.settings[f"{key}_mode"] = "custom" if own else "desktop"
+            save_settings(self.settings)
+
+        def on_colour(btn, *_args) -> None:
+            self.settings[key] = _hex(btn.get_rgba())
+            save_settings(self.settings)
+
+        row.connect("notify::selected", on_mode)
+        button.connect("notify::rgba", on_colour)
+        group.add(row)
+        return row, button
+
+    def on_theme_keys_from_selection(self, *_args) -> None:
+        if not self.picked:
+            self.toast("Select some keys on the layout first.")
+            return
+        self.settings["theme_sync_keys"] = sorted(self.picked)
+        save_settings(self.settings)
+        self._refresh_theme_keys_row()
+        self.run_theme_sync()
+
+    def run_theme_sync(self) -> None:
+        """Sync through the headless command, so the device logic lives in core."""
+        if self.busy:
+            self.toast("Already talking to the keyboard.")
+            return
+        self.busy = True
+
+        def body() -> None:
+            try:
+                result = subprocess.run(
+                    [sys.executable, "-m", "epomaker_rt100.daemon",
+                     "--sync-theme", "--force"],
+                    capture_output=True, text=True, timeout=120,
+                )
+                output = (result.stdout or result.stderr).strip()
+                if result.returncode == 0:
+                    GLib.idle_add(self._finish, output or "Synced.", None)
+                else:
+                    GLib.idle_add(self._finish, None, output or "Sync failed.")
+            except (OSError, subprocess.SubprocessError) as exc:
+                GLib.idle_add(self._finish, None, f"Sync failed: {exc}")
+
+        threading.Thread(target=body, daemon=True, name="rt100-sync").start()
 
     def _screen_page(self) -> Gtk.Widget:
         page = Adw.PreferencesPage()
@@ -1838,7 +2012,15 @@ class Window(Adw.ApplicationWindow):
         r, g, b = _rgb(self.solid_colour.get_rgba())
 
         def work(dev: RT100) -> str:
-            dev.set_rgb_all_keys(r, g, b)
+            # Not dev.set_rgb_all_keys(): it sends unpaced, and the firmware
+            # drops the high-index (right-hand) keys. Same paced path as Send.
+            keys = KeyboardKeys(dev.keymap_config)
+            mapping = EpomakerKeyRGBCommand.KeyMap(keys)
+            for key in keys:
+                mapping[key] = (r, g, b)
+            frame = EpomakerKeyRGBCommand.KeyboardRGBFrame(key_map=mapping)
+            command = EpomakerKeyRGBCommand.EpomakerKeyRGBCommand([frame])
+            dev.send_paced(command, ERASE_DELAY_S, KEY_PACKET_DELAY_S)
             return f"All keys set to rgb({r}, {g}, {b})."
 
         self.run_on_device("Solid colour", work, restore_screen=True)

@@ -85,6 +85,27 @@ The unit runs `epomaker-rt100-daemon`, not upstream's
 `hid.device().open(vendor_id, product_id)`, which takes **interface 0** — the one
 carrying key input — so it interferes with typing.
 
+## Follow desktop colours
+
+On the Backlight tab, **Follow desktop colours** colours two groups: the accent
+keys (the modifiers, or any keys you select) and all other keys. Each group
+either follows the desktop or uses a colour you pick. The accent keys take the
+desktop accent; all other keys take a command's second colour if it prints
+one, otherwise the accent too. The keys repaint when the desktop colour changes.
+
+- **Desktop accent colour** reads `accent-color` from the XDG desktop portal,
+  which GNOME and KDE provide. The `epomaker-theme-sync.service` user unit
+  watches for changes; the switch enables it.
+- **A command** is for desktops without a portal accent. The command prints the
+  accent as `#RRGGBB`, and optionally a second colour for the other keys.
+  Because there is no change signal, run `epomaker-rt100-daemon --sync-theme`
+  from your desktop's own theme hook. [`docs/examples/omarchy-colours.sh`](docs/examples/omarchy-colours.sh)
+  is a working example for Omarchy.
+
+Pastel accents are pushed to full saturation and gamma-corrected, because the
+LEDs otherwise wash them out. Colour writes go to the keyboard's flash, so
+bursts of changes are merged and writes are spaced at least 5 seconds apart.
+
 ## Launcher entry
 
 Installed from the AUR, the desktop entry is already there. From source:
